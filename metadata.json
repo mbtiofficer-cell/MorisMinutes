@@ -1,0 +1,6 @@
+{
+  "name": "MorisMinutes - Creole & French Audio Meeting Minutes",
+  "description": "Transcribe Mauritian Creole, French, and English code-switching audio verbatim and generate professional English executive meeting minutes.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
