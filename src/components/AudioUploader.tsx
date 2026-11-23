@@ -44,6 +44,7 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const recordTimerRef = useRef<number | null>(null);
+  const wakeLockRef = useRef<any>(null);
 
   // Fetch sample meetings on mount
   useEffect(() => {
@@ -53,6 +54,15 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
         if (data.samples) setSamples(data.samples);
       })
       .catch(err => console.error('Failed to load samples:', err));
+  }, []);
+
+  // Cleanup wake lock on unmount
+  useEffect(() => {
+    return () => {
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release().catch(() => {});
+      }
+    };
   }, []);
 
   const [isCompressing, setIsCompressing] = useState(false);
@@ -97,7 +107,6 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
         });
       } catch (compressionErr) {
         console.warn('In-browser audio compression fallback:', compressionErr);
-        // Fallback: use original file if decoding is unsupported
         const objectUrl = URL.createObjectURL(file);
         onAudioSelected({
           file,
@@ -140,43 +149,84 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
     }
   };
 
-  // Recording management
+  const requestWakeLock = async () => {
+    try {
+      if ('wakeLock' in navigator) {
+        wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
+      }
+    } catch (err) {
+      console.warn('Screen Wake Lock not available:', err);
+    }
+  };
+
+  const releaseWakeLock = () => {
+    if (wakeLockRef.current) {
+      wakeLockRef.current.release().catch(() => {});
+      wakeLockRef.current = null;
+    }
+  };
+
+  // Recording management with cross-browser MIME support & automatic 16kHz MP3 compression
   const startRecording = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mediaRecorder = new MediaRecorder(stream);
+      await requestWakeLock();
+
+      // Pick best supported audio format across Chrome, Edge, Android, and Safari/iOS
+      const preferredTypes = [
+        'audio/webm;codecs=opus',
+        'audio/webm',
+        'audio/mp4',
+        'audio/ogg;codecs=opus',
+      ];
+      const supportedMimeType = preferredTypes.find((type) =>
+        typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported(type)
+      ) || '';
+
+      const mediaRecorder = supportedMimeType
+        ? new MediaRecorder(stream, { mimeType: supportedMimeType })
+        : new MediaRecorder(stream);
+
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
 
       mediaRecorder.ondataavailable = (event) => {
-        if (event.data.size > 0) {
+        if (event.data && event.data.size > 0) {
           audioChunksRef.current.push(event.data);
         }
       };
 
       mediaRecorder.onstop = async () => {
-        const audioBlob = new Blob(audioChunksRef.current, { type: 'audio/webm' });
-        const base64 = await fileToBase64(audioBlob);
-        const objectUrl = URL.createObjectURL(audioBlob);
-        const timestamp = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        onAudioSelected({
-          file: audioBlob,
-          base64,
-          mimeType: 'audio/webm',
-          name: `Live_Recording_${timestamp}.webm`,
-          sizeFormatted: formatFileSize(audioBlob.size),
-          objectUrl,
-        });
-        stream.getTracks().forEach(track => track.stop());
+        releaseWakeLock();
+        stream.getTracks().forEach((track) => track.stop());
+
+        const actualMime = mediaRecorder.mimeType || supportedMimeType || 'audio/webm';
+        const extension = actualMime.includes('mp4') ? 'm4a' : actualMime.includes('ogg') ? 'ogg' : 'webm';
+        const audioBlob = new Blob(audioChunksRef.current, { type: actualMime });
+
+        if (audioBlob.size === 0) {
+          alert('No audio was captured. Please check that your microphone is not muted or blocked.');
+          return;
+        }
+
+        const now = new Date();
+        const timeTag = `${String(now.getHours()).padStart(2, '0')}h${String(now.getMinutes()).padStart(2, '0')}`;
+        const rawFileName = `Live_Meeting_${timeTag}.${extension}`;
+        const rawFile = new File([audioBlob], rawFileName, { type: actualMime });
+
+        // Route live recording through the exact same compression pipeline as uploaded files
+        await handleFileProcess(rawFile);
       };
 
-      mediaRecorder.start();
+      // Collect chunks every 1000ms so long 15–60 min meetings don't lose buffer in memory
+      mediaRecorder.start(1000);
       setIsRecording(true);
       setRecordDuration(0);
       recordTimerRef.current = window.setInterval(() => {
-        setRecordDuration(prev => prev + 1);
+        setRecordDuration((prev) => prev + 1);
       }, 1000);
     } catch (err) {
+      releaseWakeLock();
       console.error('Failed to access microphone:', err);
       alert('Microphone access was denied or is unavailable. Please check your browser permissions.');
     }
@@ -196,7 +246,6 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
   const handleSelectSample = async (sample: SampleMeeting) => {
     setIsGeneratingSample(true);
     try {
-      // First attempt: generate via server Gemini TTS
       const res = await fetch('/api/generate-sample-audio', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -206,7 +255,6 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
       if (res.ok) {
         const data = await res.json();
         if (data.audioBase64) {
-          // Convert base64 to Blob for object URL
           const byteCharacters = atob(data.audioBase64);
           const byteNumbers = new Array(byteCharacters.length);
           for (let i = 0; i < byteCharacters.length; i++) {
@@ -214,10 +262,11 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
           }
           const byteArray = new Uint8Array(byteNumbers);
           const blob = new Blob([byteArray], { type: 'audio/wav' });
+          const sampleFile = new File([blob], `${sample.title}.wav`, { type: 'audio/wav' });
           const objectUrl = URL.createObjectURL(blob);
 
           onAudioSelected({
-            file: blob,
+            file: sampleFile,
             base64: data.audioBase64,
             mimeType: 'audio/wav',
             name: `${sample.title}.wav`,
@@ -231,12 +280,12 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
         }
       }
 
-      // Fallback: create in-browser audio blob
       const fallbackBlob = await createSyntheticWavBlob(5);
+      const fallbackFile = new File([fallbackBlob], `${sample.title}.wav`, { type: 'audio/wav' });
       const fallbackBase64 = await fileToBase64(fallbackBlob);
       const objectUrl = URL.createObjectURL(fallbackBlob);
       onAudioSelected({
-        file: fallbackBlob,
+        file: fallbackFile,
         base64: fallbackBase64,
         mimeType: 'audio/wav',
         name: `${sample.title}.wav`,
@@ -247,12 +296,12 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
       setMeetingContext(`Sample Meeting: ${sample.title} (${sample.scenario})`);
     } catch (err) {
       console.warn('Sample audio error fallback:', err);
-      // Fallback to synthetic browser audio
       const fallbackBlob = await createSyntheticWavBlob(4);
+      const fallbackFile = new File([fallbackBlob], `${sample.title}.wav`, { type: 'audio/wav' });
       const fallbackBase64 = await fileToBase64(fallbackBlob);
       const objectUrl = URL.createObjectURL(fallbackBlob);
       onAudioSelected({
-        file: fallbackBlob,
+        file: fallbackFile,
         base64: fallbackBase64,
         mimeType: 'audio/wav',
         name: `${sample.title}.wav`,
@@ -313,7 +362,7 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
           <button
             type="button"
             onClick={onClearAudio}
-            disabled={isProcessing}
+            disabled={isProcessing || isCompressing}
             className="flex items-center gap-1.5 text-xs text-rose-400 hover:text-rose-300 hover:bg-rose-500/10 px-2.5 py-1.5 rounded-lg transition-colors"
           >
             <X className="w-3.5 h-3.5" />
@@ -448,14 +497,30 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
             </div>
           </div>
 
-          {isRecording ? (
+          {isCompressing ? (
+            <div className="w-full max-w-sm space-y-3">
+              <div className="flex items-center justify-center gap-2 text-sky-300 text-sm font-bold">
+                <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
+                <span>Optimizing Live Recording...</span>
+              </div>
+              <p className="text-xs text-slate-300 font-mono">
+                {compressionStatus || 'Compressing to 16kHz Mono MP3...'}
+              </p>
+              <div className="w-full bg-slate-800 rounded-full h-2 overflow-hidden">
+                <div
+                  className="bg-gradient-to-r from-sky-500 to-teal-400 h-2 rounded-full transition-all duration-300"
+                  style={{ width: `${Math.max(8, compressionProgressPercent)}%` }}
+                />
+              </div>
+            </div>
+          ) : isRecording ? (
             <div className="space-y-3">
               <div className="flex items-center justify-center gap-2 text-rose-400 font-mono text-xl font-bold">
                 <span className="w-3 h-3 rounded-full bg-rose-500 animate-ping" />
                 <span>{formatTime(recordDuration)}</span>
               </div>
               <p className="text-xs text-slate-400 max-w-sm">
-                Recording your meeting... Speak in Mauritian Creole, French, or English code-switching.
+                Recording your meeting... Keep this screen open while speaking in Mauritian Creole, French, or English.
               </p>
               <button
                 type="button"
@@ -474,6 +539,11 @@ export const AudioUploader: React.FC<AudioUploaderProps> = ({
               <p className="text-xs text-slate-400 max-w-sm">
                 Use your device microphone to capture live speech or dictate a quick multi-language summary in Creole/French.
               </p>
+              {currentAudioName && compressionStats && (
+                <div className="p-2.5 bg-emerald-500/10 border border-emerald-500/30 rounded-xl text-xs text-emerald-300">
+                  Ready: <strong>{currentAudioName}</strong> ({compressionStats.compressedFormatted})
+                </div>
+              )}
               <button
                 type="button"
                 onClick={startRecording}
