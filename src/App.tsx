@@ -57,7 +57,7 @@ export default function App() {
 
   const processingSteps = [
     'Preparing audio payload (16kHz Mono)...',
-    'Ingesting audio stream with Gemini Flash...',
+    'Ingesting audio stream with Gemini 2.5 Flash...',
     'Auto-detecting Creole dialect & code-switching verbatim line-by-line...',
     'Synthesizing executive meeting minutes with decisions & action items...',
     'Finalizing dynamic dialect insights, glossary, and metadata...',
@@ -309,7 +309,7 @@ export default function App() {
 
             <div className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-sky-500/10 border border-sky-500/20 text-xs text-sky-400 font-mono">
               <Sparkles className="w-3 h-3 text-sky-400" />
-              <span>Gemini 1.5 Flash</span>
+              <span>Gemini 2.5 Flash</span>
             </div>
           </div>
         </div>
@@ -565,6 +565,7 @@ export default function App() {
                   transcript={result.verbatimTranscript} 
                   speakersIdentified={result.speakersIdentified} 
                   result={result}
+                  audioUrl={audioData?.objectUrl || null}
                   audioBlob={audioData?.file || null}
                   onRenameSpeaker={handleRenameSpeaker}
                 />
@@ -584,6 +585,7 @@ export default function App() {
                   transcript={result.verbatimTranscript} 
                   speakersIdentified={result.speakersIdentified} 
                   result={result}
+                  audioUrl={audioData?.objectUrl || null}
                   audioBlob={audioData?.file || null}
                   onRenameSpeaker={handleRenameSpeaker}
                 />
@@ -635,7 +637,7 @@ export default function App() {
             <span>Mauritian Creole, French & English Code-Switching Speech Assistant</span>
           </div>
           <div className="flex items-center gap-3 text-slate-400">
-            <span>Powered by Gemini 1.5 Flash</span>
+            <span>Powered by Gemini 2.5 Flash</span>
             <span>•</span>
             <span>Verbatim Transcription & Executive Minutes</span>
           </div>

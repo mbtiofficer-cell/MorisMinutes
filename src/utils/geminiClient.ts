@@ -44,9 +44,9 @@ export async function getClientApiKey(): Promise<string> {
 async function waitForFileActive(ai: GoogleGenAI, fileObj: any, onStatus?: (msg: string) => void): Promise<any> {
   let fileState = fileObj.state;
   let pollCount = 0;
-  while ((fileState === 'PROCESSING' || !fileState) && pollCount < 35) {
-    onStatus?.(`Processing audio in Gemini Files API (${pollCount + 1}/35)...`);
-    await new Promise((resolve) => setTimeout(resolve, 1500));
+  while ((fileState === 'PROCESSING' || !fileState) && pollCount < 30) {
+    onStatus?.(`Preparing audio in Gemini (${pollCount + 1}/30)...`);
+    await new Promise((resolve) => setTimeout(resolve, 1000));
     try {
       const fileCheck = await ai.files.get({ name: fileObj.name });
       fileState = fileCheck.state;
@@ -90,28 +90,21 @@ export async function generateMinutesDirectly(
   const minutesTone = opts.minutesTone || 'diplomatic';
   const additionalContext = opts.additionalContext;
 
-  onStatus?.('Initializing direct client-side connection to Gemini API...');
+  onStatus?.('Connecting to Gemini API...');
   const apiKey = await getClientApiKey();
 
-  const ai = new GoogleGenAI({
-    apiKey,
-    httpOptions: {
-      headers: {
-        'User-Agent': 'aistudio-build',
-      },
-    },
-  });
+  const ai = new GoogleGenAI({ apiKey });
 
   const filesToCleanup: string[] = [];
 
   try {
-    // 1. Load & upload saved Voice Vault profiles in parallel for fast voice matching
-    const savedVoices = (await getAllVoiceProfiles()).slice(0, 10);
+    // 1. Load & upload saved Voice Vault profiles in parallel
+    const savedVoices = (await getAllVoiceProfiles()).slice(0, 8);
     const referenceVoiceParts: any[] = [];
     const referenceVoiceNames: string[] = [];
 
     if (savedVoices.length > 0) {
-      onStatus?.(`Loading ${savedVoices.length} saved voice profile(s) from Voice Vault...`);
+      onStatus?.(`Loading ${savedVoices.length} saved voice(s) from Voice Vault...`);
       const uploadedRefs = await Promise.all(
         savedVoices.map(async (vp, i) => {
           try {
@@ -149,13 +142,14 @@ export async function generateMinutesDirectly(
     }
 
     // 2. Upload main meeting audio blob
-    onStatus?.('Uploading compressed meeting audio to Gemini Files API...');
+    onStatus?.('Uploading meeting audio to Gemini...');
     const uploadDisplayName = filename || `recording_${Date.now()}.mp3`;
+    const mimeType = audioBlob.type || 'audio/mp3';
 
     const uploadedFile = await ai.files.upload({
       file: audioBlob,
       config: {
-        mimeType: 'audio/mp3',
+        mimeType,
         displayName: uploadDisplayName,
       },
     });
@@ -165,14 +159,14 @@ export async function generateMinutesDirectly(
 
     onStatus?.(
       referenceVoiceNames.length > 0
-        ? `Audio ACTIVE. Matching ${referenceVoiceNames.length} saved voice(s) & generating minutes in ${minutesLanguage}...`
-        : `Audio ACTIVE in Gemini Files API. Generating minutes in ${minutesLanguage}...`
+        ? `Matching ${referenceVoiceNames.length} saved voice(s) & generating minutes...`
+        : `Generating executive minutes in ${minutesLanguage}...`
     );
 
     const mainAudioPart = {
       fileData: {
         fileUri: uploadedFile.uri,
-        mimeType: uploadedFile.mimeType || 'audio/mp3',
+        mimeType: uploadedFile.mimeType || mimeType,
       },
     };
 
@@ -185,7 +179,6 @@ export async function generateMinutesDirectly(
       referenceVoiceNames
     );
 
-    // Valid, fast Gemini 2.5 models (no wasted retries on non-existent model IDs)
     const candidateModels = [
       'gemini-2.5-flash',
       'gemini-2.5-flash-lite',
@@ -197,7 +190,7 @@ export async function generateMinutesDirectly(
     for (const modelCandidate of candidateModels) {
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-          onStatus?.(`Transcribing audio with ${modelCandidate}${attempt > 1 ? ' (retry)' : ''}...`);
+          onStatus?.(`Transcribing & drafting minutes with ${modelCandidate}${attempt > 1 ? ' (retry)' : ''}...`);
           const res = await ai.models.generateContent({
             model: modelCandidate,
             contents: {
@@ -207,6 +200,7 @@ export async function generateMinutesDirectly(
               responseMimeType: 'application/json',
               temperature: 0.15,
               maxOutputTokens: 8192,
+              thinkingConfig: { thinkingBudget: 0 },
             },
           });
 
@@ -227,8 +221,8 @@ export async function generateMinutesDirectly(
           }
         } catch (err: any) {
           console.warn(`Direct client call to ${modelCandidate} (attempt ${attempt}) failed:`, err?.message);
-          if (attempt < 2 && (err?.status === 503 || err?.status === 429)) {
-            await new Promise((r) => setTimeout(r, 1500));
+          if (attempt < 2) {
+            await new Promise((r) => setTimeout(r, 1000));
           }
         }
       }
@@ -247,7 +241,7 @@ export async function generateMinutesDirectly(
       }
     }
 
-    onStatus?.('Parsing and structuring executive meeting minutes...');
+    onStatus?.('Formatting executive minutes...');
     const parsedData = parseMeetingJsonResponse(rawText, filename, minutesLanguage, opts.meetingMetadata);
 
     return {
