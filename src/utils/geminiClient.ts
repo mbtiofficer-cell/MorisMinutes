@@ -46,7 +46,7 @@ async function waitForFileActive(ai: GoogleGenAI, fileObj: any, onStatus?: (msg:
   let pollCount = 0;
   while ((fileState === 'PROCESSING' || !fileState) && pollCount < 35) {
     onStatus?.(`Processing audio in Gemini Files API (${pollCount + 1}/35)...`);
-    await new Promise((resolve) => setTimeout(resolve, 2000));
+    await new Promise((resolve) => setTimeout(resolve, 1500));
     try {
       const fileCheck = await ai.files.get({ name: fileObj.name });
       fileState = fileCheck.state;
@@ -105,34 +105,45 @@ export async function generateMinutesDirectly(
   const filesToCleanup: string[] = [];
 
   try {
-    // 1. Load saved Voice Vault profiles (up to 10 most recent) for automatic voice matching
+    // 1. Load & upload saved Voice Vault profiles in parallel for fast voice matching
     const savedVoices = (await getAllVoiceProfiles()).slice(0, 10);
     const referenceVoiceParts: any[] = [];
     const referenceVoiceNames: string[] = [];
 
     if (savedVoices.length > 0) {
       onStatus?.(`Loading ${savedVoices.length} saved voice profile(s) from Voice Vault...`);
-      for (let i = 0; i < savedVoices.length; i++) {
-        const vp = savedVoices[i];
-        try {
-          const uploadedRef = await ai.files.upload({
-            file: vp.clipBlob,
-            config: {
-              mimeType: vp.clipBlob.type || 'audio/wav',
-              displayName: `voice_ref_${i + 1}_${vp.name.replace(/\s+/g, '_')}.wav`,
-            },
-          });
-          filesToCleanup.push(uploadedRef.name);
-          await waitForFileActive(ai, uploadedRef);
-          referenceVoiceParts.push({
-            fileData: {
-              fileUri: uploadedRef.uri,
-              mimeType: uploadedRef.mimeType || 'audio/wav',
-            },
-          });
-          referenceVoiceNames.push(vp.name);
-        } catch (refErr) {
-          console.warn(`Skipping voice reference for ${vp.name}:`, refErr);
+      const uploadedRefs = await Promise.all(
+        savedVoices.map(async (vp, i) => {
+          try {
+            const uploadedRef = await ai.files.upload({
+              file: vp.clipBlob,
+              config: {
+                mimeType: vp.clipBlob.type || 'audio/wav',
+                displayName: `voice_ref_${i + 1}_${vp.name.replace(/\s+/g, '_')}.wav`,
+              },
+            });
+            filesToCleanup.push(uploadedRef.name);
+            await waitForFileActive(ai, uploadedRef);
+            return {
+              name: vp.name,
+              part: {
+                fileData: {
+                  fileUri: uploadedRef.uri,
+                  mimeType: uploadedRef.mimeType || 'audio/wav',
+                },
+              },
+            };
+          } catch (refErr) {
+            console.warn(`Skipping voice reference for ${vp.name}:`, refErr);
+            return null;
+          }
+        })
+      );
+
+      for (const item of uploadedRefs) {
+        if (item) {
+          referenceVoiceNames.push(item.name);
+          referenceVoiceParts.push(item.part);
         }
       }
     }
@@ -174,9 +185,10 @@ export async function generateMinutesDirectly(
       referenceVoiceNames
     );
 
+    // Valid, fast Gemini 2.5 models (no wasted retries on non-existent model IDs)
     const candidateModels = [
-      'gemini-3.8-flash',
-      'gemini-3.1-flash-lite',
+      'gemini-2.5-flash',
+      'gemini-2.5-flash-lite',
     ];
 
     let response: any = null;
@@ -185,7 +197,7 @@ export async function generateMinutesDirectly(
     for (const modelCandidate of candidateModels) {
       for (let attempt = 1; attempt <= 2; attempt++) {
         try {
-          onStatus?.(`Transcribing audio with ${modelCandidate} directly via Gemini API${attempt > 1 ? ' (retry)' : ''}...`);
+          onStatus?.(`Transcribing audio with ${modelCandidate}${attempt > 1 ? ' (retry)' : ''}...`);
           const res = await ai.models.generateContent({
             model: modelCandidate,
             contents: {

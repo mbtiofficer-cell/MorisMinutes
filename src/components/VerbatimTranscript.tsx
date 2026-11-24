@@ -104,7 +104,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
   const snippetAudioRef = useRef<HTMLAudioElement | null>(null);
   const stopTimeoutRef = useRef<number | null>(null);
 
-  // Create a direct Object URL from audioBlob for instant HTML5 seeking playback
   useEffect(() => {
     if (mainAudioUrlRef.current) {
       URL.revokeObjectURL(mainAudioUrlRef.current);
@@ -172,7 +171,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
     };
   };
 
-  // Extract distinct speakers without duplicating "Speaker 1 - Name" when "Name" is already in transcript
   const { detectedSpeakers, speakerCounts, speakerFirstTimestamp } = useMemo(() => {
     const counts = new Map<string, number>();
     const firstTs = new Map<string, number>();
@@ -187,7 +185,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
       }
     }
 
-    // Only append speakersIdentified items if they don't duplicate an existing speaker name
     const existingLower = Array.from(counts.keys()).map((k) => k.toLowerCase());
     for (const spk of speakersIdentified) {
       if (!spk) continue;
@@ -232,11 +229,12 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
     }
     if (snippetAudioRef.current) {
       snippetAudioRef.current.pause();
+      snippetAudioRef.current.src = '';
     }
     setPlayingSpeaker(null);
   };
 
-  // Instant HTML5 <audio> seek & 6-second play (works reliably on desktop & mobile without heavy decoding)
+  // Reliable HTML5 <audio> seek & 6-second play (attaches event listeners BEFORE setting src)
   const handlePlaySpeakerSnippet = async (spk: string) => {
     if (playingSpeaker === spk) {
       stopSnippetPlayback();
@@ -249,22 +247,35 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
       return;
     }
 
+    // Warn if user loaded one of the built-in synthetic silent demo samples
+    const fileName = (audioBlob as File)?.name || '';
+    if (fileName.toLowerCase().includes('sample') && audioBlob && audioBlob.size < 200000) {
+      setSavedToast('Note: Built-in demo samples are silent placeholders. Upload or record real audio to hear voices.');
+      setTimeout(() => setSavedToast(null), 4000);
+    }
+
     stopSnippetPlayback();
     setPlayingSpeaker(spk);
 
     try {
       const startSec = speakerFirstTimestamp.get(spk) || 0;
-      const audio = new Audio(mainAudioUrlRef.current);
+      const audio = new Audio();
+      audio.preload = 'auto';
       audio.volume = 1.0;
       snippetAudioRef.current = audio;
 
-      audio.onloadedmetadata = async () => {
+      let started = false;
+      const startPlayback = async () => {
+        if (started) return;
+        started = true;
         try {
           const safeStart =
             isFinite(audio.duration) && audio.duration > 1
               ? Math.min(startSec, Math.max(0, audio.duration - 1))
               : startSec;
-          audio.currentTime = safeStart;
+          if (safeStart > 0) {
+            audio.currentTime = safeStart;
+          }
           await audio.play();
 
           stopTimeoutRef.current = window.setTimeout(() => {
@@ -276,8 +287,13 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
         }
       };
 
-      audio.onended = () => stopSnippetPlayback();
-      audio.onerror = () => stopSnippetPlayback();
+      audio.addEventListener('canplay', startPlayback, { once: true });
+      audio.addEventListener('loadeddata', startPlayback, { once: true });
+      audio.addEventListener('ended', stopSnippetPlayback, { once: true });
+      audio.addEventListener('error', stopSnippetPlayback, { once: true });
+
+      audio.src = mainAudioUrlRef.current;
+      audio.load();
     } catch (err) {
       console.warn('Could not play speaker snippet:', err);
       stopSnippetPlayback();
@@ -288,7 +304,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
     const newName = (tagDrafts[oldSpeakerName] || '').trim();
     if (!newName) return;
 
-    // 1. Save 6-second voice snippet privately in IndexedDB Voice Vault
     if (audioBlob) {
       try {
         const startSec = speakerFirstTimestamp.get(oldSpeakerName) || 0;
@@ -301,7 +316,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
       }
     }
 
-    // 2. Rename speaker across transcript, minutes, attendees & exports
     onRenameSpeaker?.(oldSpeakerName, newName);
     if (selectedSpeaker === oldSpeakerName) {
       setSelectedSpeaker(newName);
@@ -449,7 +463,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
         </div>
       </div>
 
-      {/* Saved Voice Vault Drawer (Optional Management) */}
+      {/* Saved Voice Vault Drawer */}
       {showVaultManager && (
         <div className="bg-purple-950/20 border border-purple-500/30 rounded-xl p-3.5 space-y-2.5">
           <div className="flex items-center justify-between">
