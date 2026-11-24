@@ -13,6 +13,7 @@ import {
   MapPin,
   Play,
   Square,
+  SkipForward,
   UserCheck,
   Sparkles,
   Trash2,
@@ -33,6 +34,7 @@ interface VerbatimTranscriptProps {
   transcript: string;
   speakersIdentified?: string[];
   result?: MeetingAnalysisResult;
+  audioUrl?: string | null;
   audioBlob?: Blob | null;
   onRenameSpeaker?: (oldSpeakerName: string, newSpeakerName: string) => void;
 }
@@ -82,10 +84,18 @@ const SPEAKER_PALETTES = [
   },
 ];
 
+function normalizeSpeakerKey(name: string): string {
+  return name
+    .replace(/^(Speaker|Intervenant)\s*\d+\s*[-–:]\s*/i, '')
+    .trim()
+    .toLowerCase();
+}
+
 export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
   transcript,
   speakersIdentified = [],
   result,
+  audioUrl,
   audioBlob,
   onRenameSpeaker,
 }) => {
@@ -93,41 +103,36 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
   const [selectedSpeaker, setSelectedSpeaker] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  // Google Photos-style private voice tagging state
   const [tagDrafts, setTagDrafts] = useState<Record<string, string>>({});
   const [savedToast, setSavedToast] = useState<string | null>(null);
   const [playingSpeaker, setPlayingSpeaker] = useState<string | null>(null);
+  const [clipIndexBySpeaker, setClipIndexBySpeaker] = useState<Record<string, number>>({});
   const [savedProfiles, setSavedProfiles] = useState<SavedVoiceProfile[]>([]);
   const [showVaultManager, setShowVaultManager] = useState(false);
 
-  const mainAudioUrlRef = useRef<string | null>(null);
+  const fallbackUrlRef = useRef<string | null>(null);
   const snippetAudioRef = useRef<HTMLAudioElement | null>(null);
   const stopTimeoutRef = useRef<number | null>(null);
 
-  useEffect(() => {
-    if (mainAudioUrlRef.current) {
-      URL.revokeObjectURL(mainAudioUrlRef.current);
-      mainAudioUrlRef.current = null;
+  const resolvedAudioUrl = useMemo(() => {
+    if (audioUrl) return audioUrl;
+    if (fallbackUrlRef.current) {
+      URL.revokeObjectURL(fallbackUrlRef.current);
+      fallbackUrlRef.current = null;
     }
     if (audioBlob) {
-      mainAudioUrlRef.current = URL.createObjectURL(audioBlob);
+      fallbackUrlRef.current = URL.createObjectURL(audioBlob);
+      return fallbackUrlRef.current;
     }
-    return () => {
-      if (snippetAudioRef.current) {
-        snippetAudioRef.current.pause();
-      }
-      if (stopTimeoutRef.current) {
-        clearTimeout(stopTimeoutRef.current);
-      }
-      if (mainAudioUrlRef.current) {
-        URL.revokeObjectURL(mainAudioUrlRef.current);
-        mainAudioUrlRef.current = null;
-      }
-    };
-  }, [audioBlob]);
+    return null;
+  }, [audioUrl, audioBlob]);
 
   useEffect(() => {
     getAllVoiceProfiles().then(setSavedProfiles);
+    return () => {
+      if (stopTimeoutRef.current) clearTimeout(stopTimeoutRef.current);
+      if (fallbackUrlRef.current) URL.revokeObjectURL(fallbackUrlRef.current);
+    };
   }, []);
 
   const lines = useMemo(() => {
@@ -171,42 +176,68 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
     };
   };
 
-  const { detectedSpeakers, speakerCounts, speakerFirstTimestamp } = useMemo(() => {
+  // Collect ALL timestamps per speaker, sorted by longest spoken line first so the best clip plays first!
+  const { detectedSpeakers, speakerCounts, speakerClipsMap } = useMemo(() => {
     const counts = new Map<string, number>();
-    const firstTs = new Map<string, number>();
+    const rawEntriesByNorm = new Map<string, { sec: number; textLen: number }[]>();
 
     for (const rawLine of lines) {
       const parsed = parseLine(rawLine);
       if (parsed.speaker && !parsed.speaker.toLowerCase().startsWith('↳')) {
         counts.set(parsed.speaker, (counts.get(parsed.speaker) || 0) + 1);
-        if (!firstTs.has(parsed.speaker)) {
-          firstTs.set(parsed.speaker, parseTimestampToSeconds(parsed.timestamp));
+
+        if (parsed.timestamp) {
+          const norm = normalizeSpeakerKey(parsed.speaker);
+          const sec = parseTimestampToSeconds(parsed.timestamp);
+          const list = rawEntriesByNorm.get(norm) || [];
+          if (!list.some((item) => item.sec === sec)) {
+            list.push({ sec, textLen: parsed.text.length });
+          }
+          rawEntriesByNorm.set(norm, list);
         }
       }
     }
 
-    const existingLower = Array.from(counts.keys()).map((k) => k.toLowerCase());
+    const existingNorms = new Set(Array.from(counts.keys()).map(normalizeSpeakerKey));
     for (const spk of speakersIdentified) {
       if (!spk) continue;
-      const spkLower = spk.toLowerCase();
-      const isDuplicate = existingLower.some(
-        (existing) =>
-          existing === spkLower ||
-          spkLower.endsWith(`- ${existing}`) ||
-          existing.endsWith(`- ${spkLower}`)
-      );
-      if (!isDuplicate && !counts.has(spk)) {
+      const norm = normalizeSpeakerKey(spk);
+      if (!existingNorms.has(norm) && !counts.has(spk)) {
         counts.set(spk, 0);
-        firstTs.set(spk, 0);
+        existingNorms.add(norm);
       }
+    }
+
+    const clipsMap = new Map<string, number[]>();
+    for (const spk of counts.keys()) {
+      const norm = normalizeSpeakerKey(spk);
+      const entries = [...(rawEntriesByNorm.get(norm) || [])];
+      // Prioritize longer utterances so you hear a full sentence rather than a 1-word "Wi"
+      entries.sort((a, b) => b.textLen - a.textLen);
+      clipsMap.set(spk, entries.length > 0 ? entries.map((e) => e.sec) : [0]);
     }
 
     return {
       detectedSpeakers: Array.from(counts.keys()),
       speakerCounts: counts,
-      speakerFirstTimestamp: firstTs,
+      speakerClipsMap: clipsMap,
     };
   }, [lines, speakersIdentified]);
+
+  const getActiveTimestampForSpeaker = (spk: string): number => {
+    const clips = speakerClipsMap.get(spk) || [0];
+    const idx = (clipIndexBySpeaker[spk] || 0) % clips.length;
+    return clips[idx];
+  };
+
+  const handleCycleSpeakerClip = (spk: string) => {
+    const clips = speakerClipsMap.get(spk) || [0];
+    const nextIdx = ((clipIndexBySpeaker[spk] || 0) + 1) % clips.length;
+    setClipIndexBySpeaker((prev) => ({ ...prev, [spk]: nextIdx }));
+    if (playingSpeaker === spk) {
+      stopSnippetPlayback();
+    }
+  };
 
   const speakerPaletteMap = useMemo(() => {
     const map = new Map<string, (typeof SPEAKER_PALETTES)[0]>();
@@ -229,73 +260,46 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
     }
     if (snippetAudioRef.current) {
       snippetAudioRef.current.pause();
-      snippetAudioRef.current.src = '';
     }
     setPlayingSpeaker(null);
   };
 
-  // Reliable HTML5 <audio> seek & 6-second play (attaches event listeners BEFORE setting src)
   const handlePlaySpeakerSnippet = async (spk: string) => {
     if (playingSpeaker === spk) {
       stopSnippetPlayback();
       return;
     }
 
-    if (!mainAudioUrlRef.current) {
+    const audio = snippetAudioRef.current;
+    if (!audio || !resolvedAudioUrl) {
       setSavedToast('No audio loaded to preview.');
       setTimeout(() => setSavedToast(null), 2500);
       return;
-    }
-
-    // Warn if user loaded one of the built-in synthetic silent demo samples
-    const fileName = (audioBlob as File)?.name || '';
-    if (fileName.toLowerCase().includes('sample') && audioBlob && audioBlob.size < 200000) {
-      setSavedToast('Note: Built-in demo samples are silent placeholders. Upload or record real audio to hear voices.');
-      setTimeout(() => setSavedToast(null), 4000);
     }
 
     stopSnippetPlayback();
     setPlayingSpeaker(spk);
 
     try {
-      const startSec = speakerFirstTimestamp.get(spk) || 0;
-      const audio = new Audio();
-      audio.preload = 'auto';
+      const startSec = getActiveTimestampForSpeaker(spk);
+      audio.muted = false;
       audio.volume = 1.0;
-      snippetAudioRef.current = audio;
 
-      let started = false;
-      const startPlayback = async () => {
-        if (started) return;
-        started = true;
-        try {
-          const safeStart =
-            isFinite(audio.duration) && audio.duration > 1
-              ? Math.min(startSec, Math.max(0, audio.duration - 1))
-              : startSec;
-          if (safeStart > 0) {
-            audio.currentTime = safeStart;
-          }
-          await audio.play();
+      if (isFinite(audio.duration) && audio.duration > 1) {
+        audio.currentTime = Math.min(startSec, Math.max(0, audio.duration - 1));
+      } else {
+        audio.currentTime = startSec;
+      }
 
-          stopTimeoutRef.current = window.setTimeout(() => {
-            stopSnippetPlayback();
-          }, 6500);
-        } catch (playErr) {
-          console.warn('Audio playback blocked or failed:', playErr);
-          stopSnippetPlayback();
-        }
-      };
+      await audio.play();
 
-      audio.addEventListener('canplay', startPlayback, { once: true });
-      audio.addEventListener('loadeddata', startPlayback, { once: true });
-      audio.addEventListener('ended', stopSnippetPlayback, { once: true });
-      audio.addEventListener('error', stopSnippetPlayback, { once: true });
-
-      audio.src = mainAudioUrlRef.current;
-      audio.load();
+      stopTimeoutRef.current = window.setTimeout(() => {
+        stopSnippetPlayback();
+      }, 6500);
     } catch (err) {
-      console.warn('Could not play speaker snippet:', err);
+      console.warn('Snippet playback error:', err);
+      setSavedToast('Could not play audio snippet. Check that your audio file has sound.');
+      setTimeout(() => setSavedToast(null), 3500);
       stopSnippetPlayback();
     }
   };
@@ -306,7 +310,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
 
     if (audioBlob) {
       try {
-        const startSec = speakerFirstTimestamp.get(oldSpeakerName) || 0;
+        const startSec = getActiveTimestampForSpeaker(oldSpeakerName);
         const snippetBlob = await extractAudioSnippet(audioBlob, startSec, 6);
         await saveVoiceProfile(newName, snippetBlob);
         const updatedProfiles = await getAllVoiceProfiles();
@@ -406,6 +410,16 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
 
   return (
     <div className="bg-slate-900 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col h-full space-y-4">
+      {resolvedAudioUrl && (
+        <audio
+          ref={snippetAudioRef}
+          src={resolvedAudioUrl}
+          preload="auto"
+          onEnded={stopSnippetPlayback}
+          className="hidden"
+        />
+      )}
+
       {/* Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
         <div>
@@ -520,7 +534,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
                 Private Voice Tagging (Tag Once, Remember Forever)
               </span>
               <p className="text-[11px] text-slate-400 mt-0.5">
-                Listen to a 6s clip privately and enter the speaker&apos;s real name to update the minutes and remember their voice for future meetings.
+                Listen to each speaker&apos;s clearest 6s clip privately and enter their real name to update the minutes and remember their voice.
               </p>
             </div>
             {savedToast && (
@@ -534,7 +548,8 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
             {detectedSpeakers.map((spk) => {
               const palette = speakerPaletteMap.get(spk) || SPEAKER_PALETTES[0];
               const isPlaying = playingSpeaker === spk;
-              const startSec = speakerFirstTimestamp.get(spk) || 0;
+              const clips = speakerClipsMap.get(spk) || [0];
+              const startSec = getActiveTimestampForSpeaker(spk);
               const mins = Math.floor(startSec / 60);
               const secs = Math.floor(startSec % 60);
               const timeLabel = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
@@ -547,20 +562,33 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
                   key={`tag-${spk}`}
                   className="flex items-center gap-1.5 bg-slate-900/90 border border-slate-800 rounded-lg p-2"
                 >
-                  {audioBlob && (
-                    <button
-                      type="button"
-                      onClick={() => handlePlaySpeakerSnippet(spk)}
-                      title={`Listen to 6s voice sample of ${spk} at ${timeLabel}`}
-                      className={`flex items-center gap-1 px-2 py-1.5 rounded-md border text-[10px] font-mono shrink-0 transition-colors ${
-                        isPlaying
-                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
-                          : 'bg-slate-800 hover:bg-sky-500/20 text-sky-300 border-slate-700'
-                      }`}
-                    >
-                      {isPlaying ? <Square className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
-                      <span>{timeLabel}</span>
-                    </button>
+                  {resolvedAudioUrl && (
+                    <div className="flex items-center gap-1 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => handlePlaySpeakerSnippet(spk)}
+                        title={`Listen to 6s voice sample of ${spk} at ${timeLabel}`}
+                        className={`flex items-center gap-1 px-2 py-1.5 rounded-md border text-[10px] font-mono transition-colors ${
+                          isPlaying
+                            ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
+                            : 'bg-slate-800 hover:bg-sky-500/20 text-sky-300 border-slate-700'
+                        }`}
+                      >
+                        {isPlaying ? <Square className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
+                        <span>{timeLabel}</span>
+                      </button>
+
+                      {clips.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() => handleCycleSpeakerClip(spk)}
+                          title={`Switch to another timestamp where ${spk} speaks (${((clipIndexBySpeaker[spk] || 0) % clips.length) + 1}/${clips.length})`}
+                          className="p-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors"
+                        >
+                          <SkipForward className="w-3 h-3" />
+                        </button>
+                      )}
+                    </div>
                   )}
 
                   <span className={`w-2 h-2 rounded-full shrink-0 ${palette.dot}`} />
