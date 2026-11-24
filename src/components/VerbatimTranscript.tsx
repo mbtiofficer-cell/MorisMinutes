@@ -99,19 +99,36 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
   const [playingSpeaker, setPlayingSpeaker] = useState<string | null>(null);
   const [savedProfiles, setSavedProfiles] = useState<SavedVoiceProfile[]>([]);
   const [showVaultManager, setShowVaultManager] = useState(false);
-  const snippetAudioRef = useRef<HTMLAudioElement | null>(null);
-  const snippetUrlRef = useRef<string | null>(null);
 
+  const mainAudioUrlRef = useRef<string | null>(null);
+  const snippetAudioRef = useRef<HTMLAudioElement | null>(null);
+  const stopTimeoutRef = useRef<number | null>(null);
+
+  // Create a direct Object URL from audioBlob for instant HTML5 seeking playback
   useEffect(() => {
-    getAllVoiceProfiles().then(setSavedProfiles);
+    if (mainAudioUrlRef.current) {
+      URL.revokeObjectURL(mainAudioUrlRef.current);
+      mainAudioUrlRef.current = null;
+    }
+    if (audioBlob) {
+      mainAudioUrlRef.current = URL.createObjectURL(audioBlob);
+    }
     return () => {
       if (snippetAudioRef.current) {
         snippetAudioRef.current.pause();
       }
-      if (snippetUrlRef.current) {
-        URL.revokeObjectURL(snippetUrlRef.current);
+      if (stopTimeoutRef.current) {
+        clearTimeout(stopTimeoutRef.current);
+      }
+      if (mainAudioUrlRef.current) {
+        URL.revokeObjectURL(mainAudioUrlRef.current);
+        mainAudioUrlRef.current = null;
       }
     };
+  }, [audioBlob]);
+
+  useEffect(() => {
+    getAllVoiceProfiles().then(setSavedProfiles);
   }, []);
 
   const lines = useMemo(() => {
@@ -155,7 +172,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
     };
   };
 
-  // Extract distinct speakers and their earliest speaking timestamp for audio snippet preview
+  // Extract distinct speakers without duplicating "Speaker 1 - Name" when "Name" is already in transcript
   const { detectedSpeakers, speakerCounts, speakerFirstTimestamp } = useMemo(() => {
     const counts = new Map<string, number>();
     const firstTs = new Map<string, number>();
@@ -169,12 +186,24 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
         }
       }
     }
+
+    // Only append speakersIdentified items if they don't duplicate an existing speaker name
+    const existingLower = Array.from(counts.keys()).map((k) => k.toLowerCase());
     for (const spk of speakersIdentified) {
-      if (spk && !counts.has(spk)) {
+      if (!spk) continue;
+      const spkLower = spk.toLowerCase();
+      const isDuplicate = existingLower.some(
+        (existing) =>
+          existing === spkLower ||
+          spkLower.endsWith(`- ${existing}`) ||
+          existing.endsWith(`- ${spkLower}`)
+      );
+      if (!isDuplicate && !counts.has(spk)) {
         counts.set(spk, 0);
         firstTs.set(spk, 0);
       }
     }
+
     return {
       detectedSpeakers: Array.from(counts.keys()),
       speakerCounts: counts,
@@ -196,35 +225,62 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
     return map;
   }, [detectedSpeakers]);
 
+  const stopSnippetPlayback = () => {
+    if (stopTimeoutRef.current) {
+      clearTimeout(stopTimeoutRef.current);
+      stopTimeoutRef.current = null;
+    }
+    if (snippetAudioRef.current) {
+      snippetAudioRef.current.pause();
+    }
+    setPlayingSpeaker(null);
+  };
+
+  // Instant HTML5 <audio> seek & 6-second play (works reliably on desktop & mobile without heavy decoding)
   const handlePlaySpeakerSnippet = async (spk: string) => {
     if (playingSpeaker === spk) {
-      snippetAudioRef.current?.pause();
-      setPlayingSpeaker(null);
+      stopSnippetPlayback();
       return;
     }
 
-    if (!audioBlob) return;
+    if (!mainAudioUrlRef.current) {
+      setSavedToast('No audio loaded to preview.');
+      setTimeout(() => setSavedToast(null), 2500);
+      return;
+    }
+
+    stopSnippetPlayback();
+    setPlayingSpeaker(spk);
 
     try {
-      snippetAudioRef.current?.pause();
-      if (snippetUrlRef.current) {
-        URL.revokeObjectURL(snippetUrlRef.current);
-      }
-
-      setPlayingSpeaker(spk);
       const startSec = speakerFirstTimestamp.get(spk) || 0;
-      const snippetBlob = await extractAudioSnippet(audioBlob, startSec, 6);
-      const url = URL.createObjectURL(snippetBlob);
-      snippetUrlRef.current = url;
-
-      const audio = new Audio(url);
+      const audio = new Audio(mainAudioUrlRef.current);
+      audio.volume = 1.0;
       snippetAudioRef.current = audio;
-      audio.onended = () => setPlayingSpeaker(null);
-      audio.onerror = () => setPlayingSpeaker(null);
-      await audio.play();
+
+      audio.onloadedmetadata = async () => {
+        try {
+          const safeStart =
+            isFinite(audio.duration) && audio.duration > 1
+              ? Math.min(startSec, Math.max(0, audio.duration - 1))
+              : startSec;
+          audio.currentTime = safeStart;
+          await audio.play();
+
+          stopTimeoutRef.current = window.setTimeout(() => {
+            stopSnippetPlayback();
+          }, 6500);
+        } catch (playErr) {
+          console.warn('Audio playback blocked or failed:', playErr);
+          stopSnippetPlayback();
+        }
+      };
+
+      audio.onended = () => stopSnippetPlayback();
+      audio.onerror = () => stopSnippetPlayback();
     } catch (err) {
       console.warn('Could not play speaker snippet:', err);
-      setPlayingSpeaker(null);
+      stopSnippetPlayback();
     }
   };
 
@@ -464,6 +520,10 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
             {detectedSpeakers.map((spk) => {
               const palette = speakerPaletteMap.get(spk) || SPEAKER_PALETTES[0];
               const isPlaying = playingSpeaker === spk;
+              const startSec = speakerFirstTimestamp.get(spk) || 0;
+              const mins = Math.floor(startSec / 60);
+              const secs = Math.floor(startSec % 60);
+              const timeLabel = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
               const alreadySaved = savedProfiles.some(
                 (p) => p.name.toLowerCase() === spk.toLowerCase()
               );
@@ -477,14 +537,15 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
                     <button
                       type="button"
                       onClick={() => handlePlaySpeakerSnippet(spk)}
-                      title={`Listen to 6s voice sample of ${spk}`}
-                      className={`p-1.5 rounded-md border text-xs shrink-0 transition-colors ${
+                      title={`Listen to 6s voice sample of ${spk} at ${timeLabel}`}
+                      className={`flex items-center gap-1 px-2 py-1.5 rounded-md border text-[10px] font-mono shrink-0 transition-colors ${
                         isPlaying
-                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
                           : 'bg-slate-800 hover:bg-sky-500/20 text-sky-300 border-slate-700'
                       }`}
                     >
                       {isPlaying ? <Square className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
+                      <span>{timeLabel}</span>
                     </button>
                   )}
 
