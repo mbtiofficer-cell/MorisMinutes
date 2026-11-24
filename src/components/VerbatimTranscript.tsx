@@ -13,6 +13,7 @@ import {
   MapPin,
   Play,
   Square,
+  Rewind,
   FastForward,
   UserCheck,
   Sparkles,
@@ -92,6 +93,14 @@ function normalizeSpeakerKey(name: string): string {
     .toLowerCase();
 }
 
+function formatSec(sec: number): string {
+  if (!isFinite(sec) || sec < 0) return '00:00';
+  const total = Math.floor(sec);
+  const mins = Math.floor(total / 60);
+  const secs = total % 60;
+  return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
 export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
   transcript,
   speakersIdentified = [],
@@ -106,15 +115,15 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
 
   const [tagDrafts, setTagDrafts] = useState<Record<string, string>>({});
   const [savedToast, setSavedToast] = useState<string | null>(null);
-  const [playingSpeaker, setPlayingSpeaker] = useState<string | null>(null);
-  const [customSeekBySpeaker, setCustomSeekBySpeaker] = useState<Record<string, number>>({});
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [activeSpeakerPreview, setActiveSpeakerPreview] = useState<string | null>(null);
+  const [currentTime, setCurrentTime] = useState<number>(0);
   const [audioDuration, setAudioDuration] = useState<number>(0);
   const [savedProfiles, setSavedProfiles] = useState<SavedVoiceProfile[]>([]);
   const [showVaultManager, setShowVaultManager] = useState(false);
 
   const fallbackUrlRef = useRef<string | null>(null);
   const snippetAudioRef = useRef<HTMLAudioElement | null>(null);
-  const stopTimeoutRef = useRef<number | null>(null);
 
   const resolvedAudioUrl = useMemo(() => {
     if (audioUrl) return audioUrl;
@@ -132,7 +141,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
   useEffect(() => {
     getAllVoiceProfiles().then(setSavedProfiles);
     return () => {
-      if (stopTimeoutRef.current) clearTimeout(stopTimeoutRef.current);
       if (fallbackUrlRef.current) URL.revokeObjectURL(fallbackUrlRef.current);
     };
   }, []);
@@ -228,26 +236,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
     };
   }, [lines, speakersIdentified]);
 
-  const getActiveTimestampForSpeaker = (spk: string): number => {
-    if (customSeekBySpeaker[spk] !== undefined) {
-      return customSeekBySpeaker[spk];
-    }
-    const clips = speakerClipsMap.get(spk) || [0];
-    return clips[0];
-  };
-
-  // Always-visible +10s seek/skip control so user can scrub forward through any recording
-  const handleSeekForwardSpeaker = (spk: string) => {
-    const current = getActiveTimestampForSpeaker(spk);
-    const maxDur = audioDuration > 10 ? audioDuration - 5 : 3600;
-    const nextSec = current + 10 >= maxDur ? 0 : current + 10;
-    setCustomSeekBySpeaker((prev) => ({ ...prev, [spk]: nextSec }));
-
-    if (playingSpeaker === spk && snippetAudioRef.current) {
-      snippetAudioRef.current.currentTime = nextSec;
-    }
-  };
-
   const speakerPaletteMap = useMemo(() => {
     const map = new Map<string, (typeof SPEAKER_PALETTES)[0]>();
     detectedSpeakers.forEach((spk, idx) => {
@@ -262,65 +250,76 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
     return map;
   }, [detectedSpeakers]);
 
-  const stopSnippetPlayback = () => {
-    if (stopTimeoutRef.current) {
-      clearTimeout(stopTimeoutRef.current);
-      stopTimeoutRef.current = null;
-    }
+  const stopPlayback = () => {
     if (snippetAudioRef.current) {
       snippetAudioRef.current.pause();
     }
-    setPlayingSpeaker(null);
+    setIsPlaying(false);
   };
 
-  const handlePlaySpeakerSnippet = async (spk: string) => {
-    if (playingSpeaker === spk) {
-      stopSnippetPlayback();
-      return;
-    }
-
+  const seekAndPlay = async (targetSec: number, speakerLabel?: string) => {
     const audio = snippetAudioRef.current;
-    if (!audio || !resolvedAudioUrl) {
-      setSavedToast('No audio loaded to preview.');
-      setTimeout(() => setSavedToast(null), 2500);
-      return;
-    }
-
-    stopSnippetPlayback();
-    setPlayingSpeaker(spk);
+    if (!audio || !resolvedAudioUrl) return;
 
     try {
-      const startSec = getActiveTimestampForSpeaker(spk);
+      const maxDur = isFinite(audio.duration) && audio.duration > 0 ? audio.duration : audioDuration;
+      const clamped = maxDur > 1 ? Math.max(0, Math.min(targetSec, maxDur - 0.5)) : Math.max(0, targetSec);
       audio.muted = false;
       audio.volume = 1.0;
-
-      if (isFinite(audio.duration) && audio.duration > 1) {
-        audio.currentTime = Math.min(startSec, Math.max(0, audio.duration - 1));
-      } else {
-        audio.currentTime = startSec;
-      }
-
+      audio.currentTime = clamped;
+      setCurrentTime(clamped);
+      if (speakerLabel) setActiveSpeakerPreview(speakerLabel);
       await audio.play();
-
-      stopTimeoutRef.current = window.setTimeout(() => {
-        stopSnippetPlayback();
-      }, 6500);
+      setIsPlaying(true);
     } catch (err) {
-      console.warn('Snippet playback error:', err);
-      setSavedToast('Could not play audio snippet. Check that your audio file has sound.');
-      setTimeout(() => setSavedToast(null), 3500);
-      stopSnippetPlayback();
+      console.warn('Audio seek/play error:', err);
+      setIsPlaying(false);
     }
   };
 
+  const handleTogglePlayPause = async () => {
+    const audio = snippetAudioRef.current;
+    if (!audio || !resolvedAudioUrl) return;
+    if (isPlaying) {
+      stopPlayback();
+    } else {
+      await seekAndPlay(currentTime);
+    }
+  };
+
+  const handleJumpSeconds = async (deltaSec: number) => {
+    const base = snippetAudioRef.current ? snippetAudioRef.current.currentTime : currentTime;
+    await seekAndPlay(base + deltaSec);
+  };
+
+  const handleSliderScrub = (newSec: number) => {
+    setCurrentTime(newSec);
+    if (snippetAudioRef.current) {
+      snippetAudioRef.current.currentTime = newSec;
+    }
+  };
+
+  const handlePlaySpeakerJump = async (spk: string) => {
+    if (isPlaying && activeSpeakerPreview === spk) {
+      stopPlayback();
+      return;
+    }
+    const startSec = (speakerClipsMap.get(spk) || [0])[0];
+    await seekAndPlay(startSec, spk);
+  };
+
+  // Captures the exact 6 seconds you are currently listening to on the scrubber!
   const handleSaveSpeakerTag = async (oldSpeakerName: string) => {
     const newName = (tagDrafts[oldSpeakerName] || '').trim();
     if (!newName) return;
 
     if (audioBlob) {
       try {
-        const startSec = getActiveTimestampForSpeaker(oldSpeakerName);
-        const snippetBlob = await extractAudioSnippet(audioBlob, startSec, 6);
+        const captureStart =
+          snippetAudioRef.current && snippetAudioRef.current.currentTime > 0
+            ? snippetAudioRef.current.currentTime
+            : (speakerClipsMap.get(oldSpeakerName) || [0])[0];
+        const snippetBlob = await extractAudioSnippet(audioBlob, captureStart, 6);
         await saveVoiceProfile(newName, snippetBlob);
         const updatedProfiles = await getAllVoiceProfiles();
         setSavedProfiles(updatedProfiles);
@@ -429,7 +428,10 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
               setAudioDuration(e.currentTarget.duration);
             }
           }}
-          onEnded={stopSnippetPlayback}
+          onTimeUpdate={(e) => {
+            setCurrentTime(e.currentTarget.currentTime);
+          }}
+          onEnded={() => setIsPlaying(false)}
           className="hidden"
         />
       )}
@@ -538,9 +540,9 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
         </div>
       )}
 
-      {/* Google Photos-Style Private Speaker Tagging Bar */}
+      {/* Google Photos-Style Private Speaker Tagging Bar with Fast-Seek Scrubber */}
       {speakingSpeakers.length > 0 && (
-        <div className="bg-gradient-to-br from-slate-950 via-slate-950 to-sky-950/20 border border-sky-500/30 rounded-xl p-3.5 space-y-2.5">
+        <div className="bg-gradient-to-br from-slate-950 via-slate-950 to-sky-950/20 border border-sky-500/30 rounded-xl p-3.5 space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div>
               <span className="text-xs font-bold text-sky-300 flex items-center gap-1.5">
@@ -548,7 +550,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
                 Private Voice Tagging (Tag Once, Remember Forever)
               </span>
               <p className="text-[11px] text-slate-400 mt-0.5">
-                Press Play to hear their voice, use +10s to seek forward, and enter their real name to update the minutes and save to Voice Vault.
+                Drag the fast-seek bar or use the skip buttons to scan any point in the audio, then enter each speaker&apos;s name and click Tag.
               </p>
             </div>
             {savedToast && (
@@ -558,14 +560,80 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
             )}
           </div>
 
+          {/* Interactive Fast-Seek Audio Scrubber */}
+          {resolvedAudioUrl && (
+            <div className="bg-slate-900/95 border border-slate-800 rounded-lg p-2.5 space-y-2">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={handleTogglePlayPause}
+                    className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-colors ${
+                      isPlaying
+                        ? 'bg-rose-500 text-white'
+                        : 'bg-sky-500 hover:bg-sky-400 text-slate-950'
+                    }`}
+                  >
+                    {isPlaying ? <Square className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
+                    <span>{isPlaying ? 'Pause' : 'Play'}</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleJumpSeconds(-15)}
+                    title="Rewind 15 seconds"
+                    className="flex items-center gap-1 px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-mono"
+                  >
+                    <Rewind className="w-3 h-3" />
+                    <span>-15s</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleJumpSeconds(30)}
+                    title="Fast forward 30 seconds"
+                    className="flex items-center gap-1 px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-mono"
+                  >
+                    <FastForward className="w-3 h-3" />
+                    <span>+30s</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => handleJumpSeconds(120)}
+                    title="Fast forward 2 minutes"
+                    className="flex items-center gap-1 px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 text-[11px] font-mono"
+                  >
+                    <FastForward className="w-3 h-3" />
+                    <span>+2m</span>
+                  </button>
+                </div>
+
+                <span className="text-[11px] font-mono text-sky-300 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+                  {formatSec(currentTime)} / {formatSec(audioDuration)}
+                </span>
+              </div>
+
+              <input
+                type="range"
+                min={0}
+                max={audioDuration > 0 ? audioDuration : 100}
+                step={0.5}
+                value={currentTime}
+                onChange={(e) => handleSliderScrub(parseFloat(e.target.value))}
+                aria-label="Fast seek through meeting audio"
+                className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-sky-400"
+              />
+            </div>
+          )}
+
+          {/* Speaker Name Tag Inputs */}
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
             {speakingSpeakers.map((spk) => {
               const palette = speakerPaletteMap.get(spk) || SPEAKER_PALETTES[0];
-              const isPlaying = playingSpeaker === spk;
-              const startSec = getActiveTimestampForSpeaker(spk);
-              const mins = Math.floor(startSec / 60);
-              const secs = Math.floor(startSec % 60);
-              const timeLabel = `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+              const isThisPlaying = isPlaying && activeSpeakerPreview === spk;
+              const startSec = (speakerClipsMap.get(spk) || [0])[0];
+              const timeLabel = formatSec(startSec);
               const alreadySaved = savedProfiles.some(
                 (p) => p.name.toLowerCase() === spk.toLowerCase()
               );
@@ -576,31 +644,19 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
                   className="flex items-center gap-1.5 bg-slate-900/90 border border-slate-800 rounded-lg p-2"
                 >
                   {resolvedAudioUrl && (
-                    <div className="flex items-center gap-1 shrink-0">
-                      <button
-                        type="button"
-                        onClick={() => handlePlaySpeakerSnippet(spk)}
-                        title={`Listen to 6s voice sample of ${spk} at ${timeLabel}`}
-                        className={`flex items-center gap-1 px-2 py-1.5 rounded-md border text-[10px] font-mono transition-colors ${
-                          isPlaying
-                            ? 'bg-rose-500/20 text-rose-300 border-rose-500/40 animate-pulse'
-                            : 'bg-slate-800 hover:bg-sky-500/20 text-sky-300 border-slate-700'
-                        }`}
-                      >
-                        {isPlaying ? <Square className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
-                        <span>{timeLabel}</span>
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() => handleSeekForwardSpeaker(spk)}
-                        title="Seek +10 seconds forward in the audio"
-                        className="flex items-center gap-0.5 px-1.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[10px] font-mono transition-colors"
-                      >
-                        <FastForward className="w-3 h-3" />
-                        <span>+10s</span>
-                      </button>
-                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handlePlaySpeakerJump(spk)}
+                      title={`Jump to ${timeLabel} for ${spk}`}
+                      className={`flex items-center gap-1 px-2 py-1.5 rounded-md border text-[10px] font-mono shrink-0 transition-colors ${
+                        isThisPlaying
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                          : 'bg-slate-800 hover:bg-sky-500/20 text-sky-300 border-slate-700'
+                      }`}
+                    >
+                      {isThisPlaying ? <Square className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
+                      <span>{timeLabel}</span>
+                    </button>
                   )}
 
                   <span className={`w-2 h-2 rounded-full shrink-0 ${palette.dot}`} />
