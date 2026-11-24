@@ -13,7 +13,7 @@ import {
   MapPin,
   Play,
   Square,
-  SkipForward,
+  FastForward,
   UserCheck,
   Sparkles,
   Trash2,
@@ -87,6 +87,7 @@ const SPEAKER_PALETTES = [
 function normalizeSpeakerKey(name: string): string {
   return name
     .replace(/^(Speaker|Intervenant)\s*\d+\s*[-–:]\s*/i, '')
+    .replace(/^(Ps|Pasteur|Pastor|Frère|Frere|Sr|Soeur|Mr|Mrs|Ms|Dr)\.?\s+/i, '')
     .trim()
     .toLowerCase();
 }
@@ -106,7 +107,8 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
   const [tagDrafts, setTagDrafts] = useState<Record<string, string>>({});
   const [savedToast, setSavedToast] = useState<string | null>(null);
   const [playingSpeaker, setPlayingSpeaker] = useState<string | null>(null);
-  const [clipIndexBySpeaker, setClipIndexBySpeaker] = useState<Record<string, number>>({});
+  const [customSeekBySpeaker, setCustomSeekBySpeaker] = useState<Record<string, number>>({});
+  const [audioDuration, setAudioDuration] = useState<number>(0);
   const [savedProfiles, setSavedProfiles] = useState<SavedVoiceProfile[]>([]);
   const [showVaultManager, setShowVaultManager] = useState(false);
 
@@ -176,8 +178,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
     };
   };
 
-  // Collect ALL timestamps per speaker, sorted by longest spoken line first so the best clip plays first!
-  const { detectedSpeakers, speakerCounts, speakerClipsMap } = useMemo(() => {
+  const { detectedSpeakers, speakingSpeakers, speakerCounts, speakerClipsMap } = useMemo(() => {
     const counts = new Map<string, number>();
     const rawEntriesByNorm = new Map<string, { sec: number; textLen: number }[]>();
 
@@ -212,30 +213,38 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
     for (const spk of counts.keys()) {
       const norm = normalizeSpeakerKey(spk);
       const entries = [...(rawEntriesByNorm.get(norm) || [])];
-      // Prioritize longer utterances so you hear a full sentence rather than a 1-word "Wi"
       entries.sort((a, b) => b.textLen - a.textLen);
       clipsMap.set(spk, entries.length > 0 ? entries.map((e) => e.sec) : [0]);
     }
 
+    const allSpk = Array.from(counts.keys());
+    const activeSpk = allSpk.filter((s) => (counts.get(s) || 0) > 0);
+
     return {
-      detectedSpeakers: Array.from(counts.keys()),
+      detectedSpeakers: allSpk,
+      speakingSpeakers: activeSpk.length > 0 ? activeSpk : allSpk,
       speakerCounts: counts,
       speakerClipsMap: clipsMap,
     };
   }, [lines, speakersIdentified]);
 
   const getActiveTimestampForSpeaker = (spk: string): number => {
+    if (customSeekBySpeaker[spk] !== undefined) {
+      return customSeekBySpeaker[spk];
+    }
     const clips = speakerClipsMap.get(spk) || [0];
-    const idx = (clipIndexBySpeaker[spk] || 0) % clips.length;
-    return clips[idx];
+    return clips[0];
   };
 
-  const handleCycleSpeakerClip = (spk: string) => {
-    const clips = speakerClipsMap.get(spk) || [0];
-    const nextIdx = ((clipIndexBySpeaker[spk] || 0) + 1) % clips.length;
-    setClipIndexBySpeaker((prev) => ({ ...prev, [spk]: nextIdx }));
-    if (playingSpeaker === spk) {
-      stopSnippetPlayback();
+  // Always-visible +10s seek/skip control so user can scrub forward through any recording
+  const handleSeekForwardSpeaker = (spk: string) => {
+    const current = getActiveTimestampForSpeaker(spk);
+    const maxDur = audioDuration > 10 ? audioDuration - 5 : 3600;
+    const nextSec = current + 10 >= maxDur ? 0 : current + 10;
+    setCustomSeekBySpeaker((prev) => ({ ...prev, [spk]: nextSec }));
+
+    if (playingSpeaker === spk && snippetAudioRef.current) {
+      snippetAudioRef.current.currentTime = nextSec;
     }
   };
 
@@ -415,6 +424,11 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
           ref={snippetAudioRef}
           src={resolvedAudioUrl}
           preload="auto"
+          onLoadedMetadata={(e) => {
+            if (isFinite(e.currentTarget.duration)) {
+              setAudioDuration(e.currentTarget.duration);
+            }
+          }}
           onEnded={stopSnippetPlayback}
           className="hidden"
         />
@@ -525,7 +539,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
       )}
 
       {/* Google Photos-Style Private Speaker Tagging Bar */}
-      {detectedSpeakers.length > 0 && (
+      {speakingSpeakers.length > 0 && (
         <div className="bg-gradient-to-br from-slate-950 via-slate-950 to-sky-950/20 border border-sky-500/30 rounded-xl p-3.5 space-y-2.5">
           <div className="flex items-center justify-between flex-wrap gap-2">
             <div>
@@ -534,7 +548,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
                 Private Voice Tagging (Tag Once, Remember Forever)
               </span>
               <p className="text-[11px] text-slate-400 mt-0.5">
-                Listen to each speaker&apos;s clearest 6s clip privately and enter their real name to update the minutes and remember their voice.
+                Press Play to hear their voice, use +10s to seek forward, and enter their real name to update the minutes and save to Voice Vault.
               </p>
             </div>
             {savedToast && (
@@ -545,10 +559,9 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-            {detectedSpeakers.map((spk) => {
+            {speakingSpeakers.map((spk) => {
               const palette = speakerPaletteMap.get(spk) || SPEAKER_PALETTES[0];
               const isPlaying = playingSpeaker === spk;
-              const clips = speakerClipsMap.get(spk) || [0];
               const startSec = getActiveTimestampForSpeaker(spk);
               const mins = Math.floor(startSec / 60);
               const secs = Math.floor(startSec % 60);
@@ -578,16 +591,15 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
                         <span>{timeLabel}</span>
                       </button>
 
-                      {clips.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => handleCycleSpeakerClip(spk)}
-                          title={`Switch to another timestamp where ${spk} speaks (${((clipIndexBySpeaker[spk] || 0) % clips.length) + 1}/${clips.length})`}
-                          className="p-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 transition-colors"
-                        >
-                          <SkipForward className="w-3 h-3" />
-                        </button>
-                      )}
+                      <button
+                        type="button"
+                        onClick={() => handleSeekForwardSpeaker(spk)}
+                        title="Seek +10 seconds forward in the audio"
+                        className="flex items-center gap-0.5 px-1.5 py-1.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 text-[10px] font-mono transition-colors"
+                      >
+                        <FastForward className="w-3 h-3" />
+                        <span>+10s</span>
+                      </button>
                     </div>
                   )}
 
