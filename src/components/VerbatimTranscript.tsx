@@ -13,7 +13,6 @@ import {
   MapPin,
   Play,
   Square,
-  Rewind,
   FastForward,
   UserCheck,
   Sparkles,
@@ -116,6 +115,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
   const [tagDrafts, setTagDrafts] = useState<Record<string, string>>({});
   const [savedToast, setSavedToast] = useState<string | null>(null);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [isFastScanning, setIsFastScanning] = useState(false);
   const [activeSpeakerPreview, setActiveSpeakerPreview] = useState<string | null>(null);
   const [currentTime, setCurrentTime] = useState<number>(0);
   const [audioDuration, setAudioDuration] = useState<number>(0);
@@ -253,11 +253,13 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
   const stopPlayback = () => {
     if (snippetAudioRef.current) {
       snippetAudioRef.current.pause();
+      snippetAudioRef.current.playbackRate = 1.0;
     }
     setIsPlaying(false);
+    setIsFastScanning(false);
   };
 
-  const seekAndPlay = async (targetSec: number, speakerLabel?: string) => {
+  const seekAndPlay = async (targetSec: number, speakerLabel?: string, fastScan = false) => {
     const audio = snippetAudioRef.current;
     if (!audio || !resolvedAudioUrl) return;
 
@@ -266,30 +268,47 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
       const clamped = maxDur > 1 ? Math.max(0, Math.min(targetSec, maxDur - 0.5)) : Math.max(0, targetSec);
       audio.muted = false;
       audio.volume = 1.0;
+      audio.playbackRate = fastScan ? 3.0 : 1.0;
       audio.currentTime = clamped;
       setCurrentTime(clamped);
-      if (speakerLabel) setActiveSpeakerPreview(speakerLabel);
+      if (speakerLabel !== undefined) setActiveSpeakerPreview(speakerLabel);
       await audio.play();
       setIsPlaying(true);
+      setIsFastScanning(fastScan);
     } catch (err) {
       console.warn('Audio seek/play error:', err);
       setIsPlaying(false);
+      setIsFastScanning(false);
     }
   };
 
+  // Click once to Play at 1x normal speed; click again to Pause
   const handleTogglePlayPause = async () => {
     const audio = snippetAudioRef.current;
     if (!audio || !resolvedAudioUrl) return;
-    if (isPlaying) {
+    if (isPlaying && !isFastScanning) {
       stopPlayback();
     } else {
-      await seekAndPlay(currentTime);
+      await seekAndPlay(currentTime, undefined, false);
     }
   };
 
-  const handleJumpSeconds = async (deltaSec: number) => {
-    const base = snippetAudioRef.current ? snippetAudioRef.current.currentTime : currentTime;
-    await seekAndPlay(base + deltaSec);
+  // Click once to continuously Fast-Scan at 3x speed; click again to return to 1x normal speed!
+  const handleToggleFastScan = async () => {
+    const audio = snippetAudioRef.current;
+    if (!audio || !resolvedAudioUrl) return;
+
+    if (isFastScanning) {
+      // Drop immediately back to 1x normal speed so user can listen clearly to the voice they just heard
+      audio.playbackRate = 1.0;
+      setIsFastScanning(false);
+      if (audio.paused) {
+        await audio.play();
+        setIsPlaying(true);
+      }
+    } else {
+      await seekAndPlay(currentTime, undefined, true);
+    }
   };
 
   const handleSliderScrub = (newSec: number) => {
@@ -305,10 +324,9 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
       return;
     }
     const startSec = (speakerClipsMap.get(spk) || [0])[0];
-    await seekAndPlay(startSec, spk);
+    await seekAndPlay(startSec, spk, false);
   };
 
-  // Captures the exact 6 seconds you are currently listening to on the scrubber!
   const handleSaveSpeakerTag = async (oldSpeakerName: string) => {
     const newName = (tagDrafts[oldSpeakerName] || '').trim();
     if (!newName) return;
@@ -431,7 +449,10 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
           onTimeUpdate={(e) => {
             setCurrentTime(e.currentTarget.currentTime);
           }}
-          onEnded={() => setIsPlaying(false)}
+          onEnded={() => {
+            setIsPlaying(false);
+            setIsFastScanning(false);
+          }}
           className="hidden"
         />
       )}
@@ -540,7 +561,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
         </div>
       )}
 
-      {/* Google Photos-Style Private Speaker Tagging Bar with Fast-Seek Scrubber */}
+      {/* Google Photos-Style Private Speaker Tagging Bar with One-Click Continuous Fast-Scan */}
       {speakingSpeakers.length > 0 && (
         <div className="bg-gradient-to-br from-slate-950 via-slate-950 to-sky-950/20 border border-sky-500/30 rounded-xl p-3.5 space-y-3">
           <div className="flex items-center justify-between flex-wrap gap-2">
@@ -550,7 +571,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
                 Private Voice Tagging (Tag Once, Remember Forever)
               </span>
               <p className="text-[11px] text-slate-400 mt-0.5">
-                Drag the fast-seek bar or use the skip buttons to scan any point in the audio, then enter each speaker&apos;s name and click Tag.
+                Click <strong className="text-amber-300">Fast Scan 3x</strong> once to glide smoothly through the audio; click it again when you hear a new voice to listen at normal 1x speed and tag them.
               </p>
             </div>
             {savedToast && (
@@ -560,56 +581,49 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
             )}
           </div>
 
-          {/* Interactive Fast-Seek Audio Scrubber */}
+          {/* One-Click Play / Fast-Scan Toggle + Scrubber */}
           {resolvedAudioUrl && (
             <div className="bg-slate-900/95 border border-slate-800 rounded-lg p-2.5 space-y-2">
               <div className="flex items-center justify-between gap-2 flex-wrap">
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-2">
                   <button
                     type="button"
                     onClick={handleTogglePlayPause}
-                    className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-bold transition-colors ${
-                      isPlaying
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors ${
+                      isPlaying && !isFastScanning
                         ? 'bg-rose-500 text-white'
                         : 'bg-sky-500 hover:bg-sky-400 text-slate-950'
                     }`}
                   >
-                    {isPlaying ? <Square className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
-                    <span>{isPlaying ? 'Pause' : 'Play'}</span>
+                    {isPlaying && !isFastScanning ? (
+                      <>
+                        <Square className="w-3 h-3 fill-current" />
+                        <span>Pause</span>
+                      </>
+                    ) : (
+                      <>
+                        <Play className="w-3 h-3 fill-current" />
+                        <span>Play 1x</span>
+                      </>
+                    )}
                   </button>
 
                   <button
                     type="button"
-                    onClick={() => handleJumpSeconds(-15)}
-                    title="Rewind 15 seconds"
-                    className="flex items-center gap-1 px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-mono"
+                    onClick={handleToggleFastScan}
+                    title="Click once to continuously fast-forward at 3x speed; click again to stop fast-scan and listen at 1x speed"
+                    className={`flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-bold transition-colors border ${
+                      isFastScanning
+                        ? 'bg-amber-400 text-slate-950 border-amber-300 animate-pulse shadow-md shadow-amber-500/20'
+                        : 'bg-slate-800 hover:bg-amber-500/20 text-amber-300 border-amber-500/40'
+                    }`}
                   >
-                    <Rewind className="w-3 h-3" />
-                    <span>-15s</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handleJumpSeconds(30)}
-                    title="Fast forward 30 seconds"
-                    className="flex items-center gap-1 px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-mono"
-                  >
-                    <FastForward className="w-3 h-3" />
-                    <span>+30s</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => handleJumpSeconds(120)}
-                    title="Fast forward 2 minutes"
-                    className="flex items-center gap-1 px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-sky-300 border border-slate-700 text-[11px] font-mono"
-                  >
-                    <FastForward className="w-3 h-3" />
-                    <span>+2m</span>
+                    <FastForward className="w-3.5 h-3.5" />
+                    <span>{isFastScanning ? 'Stop Scan (Back to 1x)' : 'Fast Scan 3x'}</span>
                   </button>
                 </div>
 
-                <span className="text-[11px] font-mono text-sky-300 bg-slate-950 px-2 py-0.5 rounded border border-slate-800">
+                <span className="text-[11px] font-mono text-sky-300 bg-slate-950 px-2.5 py-1 rounded border border-slate-800">
                   {formatSec(currentTime)} / {formatSec(audioDuration)}
                 </span>
               </div>
@@ -621,7 +635,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
                 step={0.5}
                 value={currentTime}
                 onChange={(e) => handleSliderScrub(parseFloat(e.target.value))}
-                aria-label="Fast seek through meeting audio"
+                aria-label="Seek through meeting audio"
                 className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-sky-400"
               />
             </div>
