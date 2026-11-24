@@ -5,7 +5,8 @@ export function buildMeetingPrompt(
   transcriptFormat: TranscriptFormat = 'original',
   minutesTone: MinutesTone = 'diplomatic',
   additionalContext?: string,
-  meetingMetadata?: MeetingMetadata
+  meetingMetadata?: MeetingMetadata,
+  referenceVoiceNames: string[] = []
 ): string {
   // 1. Transcript formatting instructions with dynamic multi-speaker diarization
   let transcriptInstruction = '';
@@ -136,6 +137,27 @@ RULE 3 — COMPACT TOTAL RESPONSE SIZE:
 - Focus on consensus, systemic solutions, and executive professionalism throughout the summary, key topics, and action items.`;
   }
 
+  // 5. Known Voice Vault Reference Matching Instructions
+  let voiceVaultInstruction = '';
+  if (referenceVoiceNames.length > 0) {
+    const mappedList = referenceVoiceNames
+      .map((name, idx) => `- Voice Reference Clip #${idx + 1} (attached before the main meeting recording) belongs to: "${name}"`)
+      .join('\n');
+    voiceVaultInstruction = `
+════════════════════════════════════════════════════════════════════════════════
+VOICE VAULT SPEAKER RECOGNITION (SAVED VOICE SAMPLES PROVIDED)
+════════════════════════════════════════════════════════════════════════════════
+The user has attached ${referenceVoiceNames.length} short reference voice clip(s) BEFORE the main meeting recording so you can recognize known team members automatically:
+${mappedList}
+
+MANDATORY VOICE MATCHING RULES:
+- Compare the vocal timbre, pitch, cadence, and accent of each speaker in the main meeting recording against the attached Voice Reference Clip(s).
+- Whenever a speaker in the main meeting recording matches one of the reference voice clips, label EVERY single one of their turns directly with their exact saved name (e.g., "[00:15] ${referenceVoiceNames[0]} [Kreol]: ...") instead of generic "Speaker 1" or "Speaker 2".
+- Do NOT transcribe the short reference clips themselves as part of the meeting dialogue—only transcribe the main meeting recording (the final audio file attached).
+- For any voice in the main meeting that does NOT match a saved reference clip, label them cleanly as "Speaker 1", "Speaker 2", etc. (or use their name if introduced in the meeting).
+════════════════════════════════════════════════════════════════════════════════`;
+  }
+
   return `You are an expert multilingual AI assistant specializing in corporate, community, church, and organizational meetings conducted in Creole dialects and multilingual speech.
 You possess native fluency and linguistic expertise across global Creole varieties: Mauritian Creole (Kréol Morisien), Seychellois Creole (Seselwa), Haitian Creole (Kreyòl Ayisyen), Reunion Creole, Martinican/Guadeloupean Creole, Papiamento, and West African Pidgin/Creole, alongside fluent French and English code-switching.
 
@@ -144,6 +166,8 @@ ${dialectRecognitionGuidance}
 ${strictOutputLanguageMandate}
 
 ${toneInstruction}
+
+${voiceVaultInstruction}
 
 ${transcriptInstruction}
 
@@ -178,7 +202,7 @@ CRITICAL RULE 1 — STRICT ANTI-REPETITION, ANTI-LOOP & DRY (DON'T REPEAT YOURSE
   • If a phrase or turn occurs in audio, never repeat the phrase in a continuous cycle. Limit phrase repetition to at most 2 times, then append [Pause].
 
 CRITICAL RULE 2 — ACCURATE DYNAMIC SPEAKER DIARIZATION:
-- Ensure you identify and label distinct speakers dynamically based on acoustic voice differences, conversational turn-taking, context, and introductions (e.g., "Speaker 1 - Président", "Speaker 2 - Pasteur Govin", "Speaker 3 - Pasteur Kevin", "Speaker 4 - Délégué Elim", etc.) rather than labeling every line as Speaker 1.
+- Ensure you identify and label distinct speakers dynamically based on saved Voice Reference Clips, acoustic voice differences, conversational turn-taking, context, and introductions rather than labeling every line as Speaker 1.
 - Actively listen for name vocatives, titles, and introductions (e.g., when an attendee says "Mersi Pasteur Govin", "Kevin to kapav fer sa", "Frère...", "Sœur...", "Monsieur le Président", or introduces their role).
 - Maintain distinct speaker tags consistently across conversational turns. Do NOT attribute the entire discussion or alternating turns to a single speaker.
 

@@ -1,12 +1,40 @@
-import React, { useState, useMemo } from 'react';
-import { Search, Copy, Check, Download, Languages, Users, User, Filter, Volume2, Calendar, Clock, MapPin } from 'lucide-react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
+import {
+  Search,
+  Copy,
+  Check,
+  Download,
+  Users,
+  User,
+  Filter,
+  Volume2,
+  Calendar,
+  Clock,
+  MapPin,
+  Play,
+  Square,
+  UserCheck,
+  Sparkles,
+  Trash2,
+  Database
+} from 'lucide-react';
 import { MeetingAnalysisResult } from '../types';
 import { cleanVerbatimTranscript } from '../utils/transcriptCleaner';
+import {
+  getAllVoiceProfiles,
+  saveVoiceProfile,
+  deleteVoiceProfile,
+  extractAudioSnippet,
+  parseTimestampToSeconds,
+  SavedVoiceProfile,
+} from '../utils/voiceVault';
 
 interface VerbatimTranscriptProps {
   transcript: string;
   speakersIdentified?: string[];
   result?: MeetingAnalysisResult;
+  audioBlob?: Blob | null;
+  onRenameSpeaker?: (oldSpeakerName: string, newSpeakerName: string) => void;
 }
 
 const SPEAKER_PALETTES = [
@@ -43,6 +71,7 @@ const SPEAKER_PALETTES = [
   {
     badge: 'bg-indigo-500/15 text-indigo-300 border-indigo-500/30',
     avatar: 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/30',
+    border: 'border-l-indigo-400 group-hover:border-indigo-300',
     dot: 'bg-indigo-400',
   },
   {
@@ -53,21 +82,46 @@ const SPEAKER_PALETTES = [
   },
 ];
 
-export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcript, speakersIdentified = [], result }) => {
+export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({
+  transcript,
+  speakersIdentified = [],
+  result,
+  audioBlob,
+  onRenameSpeaker,
+}) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedSpeaker, setSelectedSpeaker] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  // Split lines and trim, with automatic anti-repetition cleaning
+  // Google Photos-style private voice tagging state
+  const [tagDrafts, setTagDrafts] = useState<Record<string, string>>({});
+  const [savedToast, setSavedToast] = useState<string | null>(null);
+  const [playingSpeaker, setPlayingSpeaker] = useState<string | null>(null);
+  const [savedProfiles, setSavedProfiles] = useState<SavedVoiceProfile[]>([]);
+  const [showVaultManager, setShowVaultManager] = useState(false);
+  const snippetAudioRef = useRef<HTMLAudioElement | null>(null);
+  const snippetUrlRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    getAllVoiceProfiles().then(setSavedProfiles);
+    return () => {
+      if (snippetAudioRef.current) {
+        snippetAudioRef.current.pause();
+      }
+      if (snippetUrlRef.current) {
+        URL.revokeObjectURL(snippetUrlRef.current);
+      }
+    };
+  }, []);
+
   const lines = useMemo(() => {
     const cleaned = cleanVerbatimTranscript(transcript || '');
     return cleaned
       .split('\n')
-      .map(line => line.trim())
-      .filter(line => line.length > 0);
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
   }, [transcript]);
 
-  // Helper to parse line for timestamp, dynamic speaker name, inline tags, and text
   const parseLine = (rawLine: string) => {
     const timestampMatch = rawLine.match(/^(\[\d{1,2}:\d{2}(?::\d{2})?\])/);
     const timestamp = timestampMatch ? timestampMatch[1] : null;
@@ -78,7 +132,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
       let rawSpeaker = speakerMatch[1].trim();
       const text = speakerMatch[2].trim();
 
-      // Check for inline bracketed tag in speaker part, e.g. [Kreol], [Français], [English Trans.], [Original]
       let inlineTag: string | null = null;
       const tagMatch = rawSpeaker.match(/\[(.*?)\]/);
       if (tagMatch) {
@@ -102,32 +155,36 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
     };
   };
 
-  // Extract all distinct speakers dynamically across transcript
-  const { detectedSpeakers, speakerCounts } = useMemo(() => {
+  // Extract distinct speakers and their earliest speaking timestamp for audio snippet preview
+  const { detectedSpeakers, speakerCounts, speakerFirstTimestamp } = useMemo(() => {
     const counts = new Map<string, number>();
+    const firstTs = new Map<string, number>();
+
     for (const rawLine of lines) {
       const parsed = parseLine(rawLine);
       if (parsed.speaker && !parsed.speaker.toLowerCase().startsWith('↳')) {
         counts.set(parsed.speaker, (counts.get(parsed.speaker) || 0) + 1);
+        if (!firstTs.has(parsed.speaker)) {
+          firstTs.set(parsed.speaker, parseTimestampToSeconds(parsed.timestamp));
+        }
       }
     }
-    // Include any passed from speakersIdentified
     for (const spk of speakersIdentified) {
       if (spk && !counts.has(spk)) {
         counts.set(spk, 0);
+        firstTs.set(spk, 0);
       }
     }
     return {
       detectedSpeakers: Array.from(counts.keys()),
       speakerCounts: counts,
+      speakerFirstTimestamp: firstTs,
     };
   }, [lines, speakersIdentified]);
 
-  // Map each speaker to a consistent color palette index
   const speakerPaletteMap = useMemo(() => {
-    const map = new Map<string, typeof SPEAKER_PALETTES[0]>();
+    const map = new Map<string, (typeof SPEAKER_PALETTES)[0]>();
     detectedSpeakers.forEach((spk, idx) => {
-      // Check if speaker has an explicit number like "Speaker 2 - ..."
       const match = spk.match(/Speaker\s*(\d+)/i) || spk.match(/Intervenant\s*(\d+)/i);
       if (match) {
         const num = parseInt(match[1], 10) - 1;
@@ -139,12 +196,81 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
     return map;
   }, [detectedSpeakers]);
 
-  // Filter lines by search term and selected speaker
+  const handlePlaySpeakerSnippet = async (spk: string) => {
+    if (playingSpeaker === spk) {
+      snippetAudioRef.current?.pause();
+      setPlayingSpeaker(null);
+      return;
+    }
+
+    if (!audioBlob) return;
+
+    try {
+      snippetAudioRef.current?.pause();
+      if (snippetUrlRef.current) {
+        URL.revokeObjectURL(snippetUrlRef.current);
+      }
+
+      setPlayingSpeaker(spk);
+      const startSec = speakerFirstTimestamp.get(spk) || 0;
+      const snippetBlob = await extractAudioSnippet(audioBlob, startSec, 6);
+      const url = URL.createObjectURL(snippetBlob);
+      snippetUrlRef.current = url;
+
+      const audio = new Audio(url);
+      snippetAudioRef.current = audio;
+      audio.onended = () => setPlayingSpeaker(null);
+      audio.onerror = () => setPlayingSpeaker(null);
+      await audio.play();
+    } catch (err) {
+      console.warn('Could not play speaker snippet:', err);
+      setPlayingSpeaker(null);
+    }
+  };
+
+  const handleSaveSpeakerTag = async (oldSpeakerName: string) => {
+    const newName = (tagDrafts[oldSpeakerName] || '').trim();
+    if (!newName) return;
+
+    // 1. Save 6-second voice snippet privately in IndexedDB Voice Vault
+    if (audioBlob) {
+      try {
+        const startSec = speakerFirstTimestamp.get(oldSpeakerName) || 0;
+        const snippetBlob = await extractAudioSnippet(audioBlob, startSec, 6);
+        await saveVoiceProfile(newName, snippetBlob);
+        const updatedProfiles = await getAllVoiceProfiles();
+        setSavedProfiles(updatedProfiles);
+      } catch (err) {
+        console.warn('Could not save voice snippet to Voice Vault:', err);
+      }
+    }
+
+    // 2. Rename speaker across transcript, minutes, attendees & exports
+    onRenameSpeaker?.(oldSpeakerName, newName);
+    if (selectedSpeaker === oldSpeakerName) {
+      setSelectedSpeaker(newName);
+    }
+
+    setTagDrafts((prev) => {
+      const copy = { ...prev };
+      delete copy[oldSpeakerName];
+      return copy;
+    });
+
+    setSavedToast(`Saved "${newName}" to Voice Vault for future meetings!`);
+    setTimeout(() => setSavedToast(null), 3500);
+  };
+
+  const handleDeleteSavedVoice = async (id: string) => {
+    await deleteVoiceProfile(id);
+    const updated = await getAllVoiceProfiles();
+    setSavedProfiles(updated);
+  };
+
   const filteredLines = useMemo(() => {
-    return lines.filter(rawLine => {
+    return lines.filter((rawLine) => {
       const parsed = parseLine(rawLine);
 
-      // Speaker filter (allow dual translation subline through if parent speaker selected)
       if (selectedSpeaker) {
         const isSubline = rawLine.includes('↳') || /^\s*\[(english|français|trad)\]/i.test(rawLine);
         if (!isSubline && parsed.speaker !== selectedSpeaker) {
@@ -152,7 +278,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
         }
       }
 
-      // Search term filter
       if (searchTerm) {
         const term = searchTerm.toLowerCase();
         return rawLine.toLowerCase().includes(term);
@@ -179,9 +304,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
     URL.revokeObjectURL(url);
   };
 
-  // Helper to format spoken text and highlight search terms & bracketed annotations
   const renderTextContent = (text: string) => {
-    // Break down text by [pause], [laughter], [inaudible], etc.
     const annotationRegex = /(\[(?:laughter|pause|laughter\/pause|rire|silence|inaudible|applause|crosstalk)\])/gi;
     const segments = text.split(annotationRegex);
 
@@ -197,7 +320,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
         );
       }
 
-      // Highlight search term inside regular text
       if (!searchTerm) return seg;
       const parts = seg.split(new RegExp(`(${searchTerm})`, 'gi'));
       return parts.map((part, i) =>
@@ -228,12 +350,21 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
             </span>
           </div>
           <p className="text-xs text-slate-400 mt-1">
-            Sentence-by-sentence dialogue attributing distinct speakers dynamically from vocal context and introductions.
+            Sentence-by-sentence dialogue attributing distinct speakers dynamically from vocal context and saved voices.
           </p>
         </div>
 
         {/* Toolbar */}
         <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowVaultManager((v) => !v)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 text-xs font-semibold transition-colors border border-purple-500/30"
+            title="View or manage saved speaker voiceprints stored privately on this device"
+          >
+            <Database className="w-3.5 h-3.5" />
+            <span>Voice Vault ({savedProfiles.length})</span>
+          </button>
           <button
             type="button"
             onClick={handleCopy}
@@ -262,6 +393,143 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
         </div>
       </div>
 
+      {/* Saved Voice Vault Drawer (Optional Management) */}
+      {showVaultManager && (
+        <div className="bg-purple-950/20 border border-purple-500/30 rounded-xl p-3.5 space-y-2.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-bold text-purple-200 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-purple-400" />
+              Saved Voice Profiles on This Device ({savedProfiles.length})
+            </span>
+            <button
+              type="button"
+              onClick={() => setShowVaultManager(false)}
+              className="text-[11px] text-slate-400 hover:text-slate-200"
+            >
+              Close
+            </button>
+          </div>
+          <p className="text-[11px] text-slate-400">
+            Stored privately in your browser. Whenever you record or upload future meetings, Gemini automatically matches these voices to their names.
+          </p>
+          {savedProfiles.length === 0 ? (
+            <p className="text-xs text-slate-400 italic py-1">
+              No voices saved yet. Tag any speaker below to save their voice automatically!
+            </p>
+          ) : (
+            <div className="flex flex-wrap gap-2">
+              {savedProfiles.map((vp) => (
+                <div
+                  key={vp.id}
+                  className="flex items-center gap-2 bg-slate-900 border border-purple-500/30 rounded-lg px-2.5 py-1 text-xs text-purple-200"
+                >
+                  <UserCheck className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="font-semibold">{vp.name}</span>
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteSavedVoice(vp.id)}
+                    title={`Remove ${vp.name}`}
+                    className="text-slate-400 hover:text-rose-400 transition-colors"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Google Photos-Style Private Speaker Tagging Bar */}
+      {detectedSpeakers.length > 0 && (
+        <div className="bg-gradient-to-br from-slate-950 via-slate-950 to-sky-950/20 border border-sky-500/30 rounded-xl p-3.5 space-y-2.5">
+          <div className="flex items-center justify-between flex-wrap gap-2">
+            <div>
+              <span className="text-xs font-bold text-sky-300 flex items-center gap-1.5">
+                <UserCheck className="w-3.5 h-3.5 text-sky-400" />
+                Private Voice Tagging (Tag Once, Remember Forever)
+              </span>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Listen to a 6s clip privately and enter the speaker&apos;s real name to update the minutes and remember their voice for future meetings.
+              </p>
+            </div>
+            {savedToast && (
+              <span className="text-[11px] font-semibold px-2.5 py-1 rounded-lg bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                {savedToast}
+              </span>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            {detectedSpeakers.map((spk) => {
+              const palette = speakerPaletteMap.get(spk) || SPEAKER_PALETTES[0];
+              const isPlaying = playingSpeaker === spk;
+              const alreadySaved = savedProfiles.some(
+                (p) => p.name.toLowerCase() === spk.toLowerCase()
+              );
+
+              return (
+                <div
+                  key={`tag-${spk}`}
+                  className="flex items-center gap-1.5 bg-slate-900/90 border border-slate-800 rounded-lg p-2"
+                >
+                  {audioBlob && (
+                    <button
+                      type="button"
+                      onClick={() => handlePlaySpeakerSnippet(spk)}
+                      title={`Listen to 6s voice sample of ${spk}`}
+                      className={`p-1.5 rounded-md border text-xs shrink-0 transition-colors ${
+                        isPlaying
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/40'
+                          : 'bg-slate-800 hover:bg-sky-500/20 text-sky-300 border-slate-700'
+                      }`}
+                    >
+                      {isPlaying ? <Square className="w-3 h-3 fill-current" /> : <Play className="w-3 h-3 fill-current" />}
+                    </button>
+                  )}
+
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${palette.dot}`} />
+
+                  <input
+                    type="text"
+                    value={tagDrafts[spk] !== undefined ? tagDrafts[spk] : ''}
+                    onChange={(e) =>
+                      setTagDrafts((prev) => ({ ...prev, [spk]: e.target.value }))
+                    }
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        handleSaveSpeakerTag(spk);
+                      }
+                    }}
+                    placeholder={spk}
+                    className="min-w-0 flex-1 bg-slate-950 border border-slate-800 focus:border-sky-500 rounded-md px-2 py-1 text-xs text-slate-100 placeholder-slate-400 focus:outline-none"
+                  />
+
+                  {alreadySaved && !tagDrafts[spk] ? (
+                    <span
+                      title="Voice saved in Voice Vault"
+                      className="text-[10px] font-semibold px-2 py-1 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 shrink-0"
+                    >
+                      Saved
+                    </span>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={!(tagDrafts[spk] || '').trim()}
+                      onClick={() => handleSaveSpeakerTag(spk)}
+                      className="px-2.5 py-1 rounded-md text-[11px] font-bold bg-sky-500 hover:bg-sky-400 disabled:bg-slate-800 disabled:text-slate-500 text-slate-950 transition-colors shrink-0"
+                    >
+                      Tag
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
       {/* Prominent Meeting Metadata Header Card */}
       {result && (
         <div className="bg-slate-950/80 border border-slate-800/90 rounded-xl p-4 shadow-inner space-y-3">
@@ -276,7 +544,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
           </div>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-            {/* Meeting Date */}
             <div className="flex items-start gap-2.5 bg-slate-900/60 border border-slate-800/60 rounded-lg p-2.5">
               <div className="p-2 rounded-lg bg-sky-500/10 text-sky-400 border border-sky-500/20 shrink-0">
                 <Calendar className="w-4 h-4" />
@@ -291,7 +558,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
               </div>
             </div>
 
-            {/* Time Window */}
             <div className="flex items-start gap-2.5 bg-slate-900/60 border border-slate-800/60 rounded-lg p-2.5">
               <div className="p-2 rounded-lg bg-teal-500/10 text-teal-400 border border-teal-500/20 shrink-0">
                 <Clock className="w-4 h-4" />
@@ -310,7 +576,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
               </div>
             </div>
 
-            {/* Venue / Location */}
             <div className="flex items-start gap-2.5 bg-slate-900/60 border border-slate-800/60 rounded-lg p-2.5">
               <div className="p-2 rounded-lg bg-amber-500/10 text-amber-400 border border-amber-500/20 shrink-0">
                 <MapPin className="w-4 h-4" />
@@ -325,7 +590,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
               </div>
             </div>
 
-            {/* Attendance Count */}
             <div className="flex items-start gap-2.5 bg-slate-900/60 border border-slate-800/60 rounded-lg p-2.5">
               <div className="p-2 rounded-lg bg-indigo-500/10 text-indigo-400 border border-indigo-500/20 shrink-0">
                 <Users className="w-4 h-4" />
@@ -341,7 +605,6 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
             </div>
           </div>
 
-          {/* Attendees Present */}
           <div className="bg-slate-900/60 border border-slate-800/60 rounded-lg p-2.5 flex items-start gap-2.5">
             <div className="p-2 rounded-lg bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 shrink-0">
               <Users className="w-4 h-4" />
@@ -364,7 +627,7 @@ export const VerbatimTranscript: React.FC<VerbatimTranscriptProps> = ({ transcri
           <div className="flex items-center justify-between text-[11px] text-slate-400 mb-2">
             <span className="font-semibold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
               <Filter className="w-3 h-3 text-sky-400" />
-              Identified Speakers ({detectedSpeakers.length})
+              Filter by Speaker ({detectedSpeakers.length})
             </span>
             {selectedSpeaker && (
               <button

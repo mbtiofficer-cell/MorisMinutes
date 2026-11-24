@@ -3,7 +3,6 @@ import {
   Sparkles, 
   FileText, 
   Languages, 
-  RotateCcw, 
   AlertTriangle, 
   Loader2, 
   Split, 
@@ -11,7 +10,6 @@ import {
   CheckSquare, 
   FileCode,
   ShieldCheck,
-  Headphones,
   Users,
   Check,
   FileDown
@@ -33,6 +31,10 @@ import {
 } from './types';
 import { generateMinutesDirectly } from './utils/geminiClient';
 import { exportToPDF, exportToWord } from './utils/exportUtils';
+
+function escapeRegExp(str: string): string {
+  return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 export default function App() {
   const [audioData, setAudioData] = useState<AudioSelectionData | null>(null);
@@ -75,6 +77,51 @@ export default function App() {
     setError(null);
   };
 
+  const handleRenameSpeaker = (oldName: string, newName: string) => {
+    if (!result || !oldName.trim() || !newName.trim() || oldName === newName) return;
+
+    const pattern = new RegExp(escapeRegExp(oldName), 'g');
+    const replaceText = (txt?: string) => (txt ? txt.replace(pattern, newName) : txt || '');
+
+    setResult((prev) => {
+      if (!prev) return null;
+      const updatedSpeakers = Array.from(
+        new Set((prev.speakersIdentified || []).map((s) => (s === oldName ? newName : s)))
+      );
+
+      const updatedAttendees = prev.attendeesPresent
+        ? prev.attendeesPresent.includes(oldName)
+          ? prev.attendeesPresent.replace(pattern, newName)
+          : `${prev.attendeesPresent}, ${newName}`
+        : updatedSpeakers.join(', ');
+
+      return {
+        ...prev,
+        speakersIdentified: updatedSpeakers,
+        attendeesPresent: updatedAttendees,
+        verbatimTranscript: replaceText(prev.verbatimTranscript),
+        fullMarkdownOutput: replaceText(prev.fullMarkdownOutput),
+        executiveMinutes: {
+          ...prev.executiveMinutes,
+          meetingOverview: replaceText(prev.executiveMinutes.meetingOverview),
+          keyTopicsDiscussed: (prev.executiveMinutes.keyTopicsDiscussed || []).map((topic) => ({
+            ...topic,
+            topic: replaceText(topic.topic),
+            summary: replaceText(topic.summary),
+            discussionPoints: (topic.discussionPoints || []).map((dp) => replaceText(dp)),
+          })),
+          decisions: (prev.executiveMinutes.decisions || []).map((d) => replaceText(d)),
+          actionItems: (prev.executiveMinutes.actionItems || []).map((item) => ({
+            ...item,
+            task: replaceText(item.task),
+            owner: replaceText(item.owner),
+          })),
+          nextSteps: (prev.executiveMinutes.nextSteps || []).map((ns) => replaceText(ns)),
+        },
+      };
+    });
+  };
+
   const handleMetadataChange = (updated: MeetingMetadata) => {
     setMeetingMetadata(updated);
     if (result) {
@@ -113,10 +160,8 @@ export default function App() {
 
     setError(null);
     let targetFile = audioData.file;
-    let targetMime = audioData.mimeType;
     let targetName = audioData.name;
 
-    // 1. If audio is not yet aggressively compressed to 16kHz mono (or > 5MB), compress it first
     const isAlreadyCompressed = audioData.name.includes('_16k_');
     const isLarge = audioData.file.size > 5 * 1024 * 1024;
 
@@ -133,10 +178,8 @@ export default function App() {
         });
 
         targetFile = compResult.compressedFile;
-        targetMime = 'audio/mp3';
         targetName = compResult.compressedFile.name;
 
-        // Update local state to reflect the compressed file
         setAudioData(prev => prev ? {
           ...prev,
           file: compResult.compressedFile,
@@ -153,7 +196,6 @@ export default function App() {
       }
     }
 
-    // 2. Direct client-side Gemini API execution (bypasses intermediate server route)
     setIsProcessing(true);
     setProcessingStep(0);
     setClientDirectStatus('Connecting directly to Gemini API from browser...');
@@ -163,7 +205,6 @@ export default function App() {
     }, 2800);
 
     try {
-      console.log('[Client Direct] Transcribing directly with Gemini from client...', { minutesLanguage, transcriptFormat, minutesTone });
       const directResult = await generateMinutesDirectly(
         targetFile,
         targetName,
@@ -180,7 +221,6 @@ export default function App() {
       clearInterval(stepInterval);
       if (directResult.data) {
         setResult(directResult.data);
-        // Sync any AI-inferred fields into the editable form state if empty
         setMeetingMetadata(prev => ({
           meetingDate: prev.meetingDate || directResult.data.meetingDate || '',
           timeStarted: prev.timeStarted || directResult.data.timeStarted || '',
@@ -235,7 +275,6 @@ export default function App() {
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
-            {/* Header Language Dropdown Selector */}
             <div className="flex items-center gap-1.5 bg-slate-950/80 border border-slate-700/80 rounded-lg px-2.5 py-1 shadow-sm">
               <Languages className="w-3.5 h-3.5 text-sky-400 shrink-0" />
               <label htmlFor="header-language-select" className="sr-only">Spoken Dialect & Recognition</label>
@@ -278,7 +317,6 @@ export default function App() {
 
       {/* Main Content Area */}
       <main className="flex-1 max-w-7xl mx-auto w-full px-4 sm:px-6 py-6 sm:py-8 space-y-6">
-        {/* Hero Section */}
         <div className="text-center max-w-3xl mx-auto space-y-2">
           <h2 className="text-2xl sm:text-3xl font-extrabold text-slate-100 tracking-tight">
             Transcribe Multilingual Audio into{' '}
@@ -291,7 +329,6 @@ export default function App() {
           </p>
         </div>
 
-        {/* Input & Control Card */}
         <div className="space-y-4">
           <AudioUploader
             onAudioSelected={handleAudioSelected}
@@ -302,7 +339,6 @@ export default function App() {
             setMeetingContext={setMeetingContext}
           />
 
-          {/* Audio Player preview if loaded */}
           {audioData && (
             <AudioPlayer
               audioUrl={audioData.objectUrl}
@@ -313,14 +349,12 @@ export default function App() {
             />
           )}
 
-          {/* Meeting Metadata & Venue Header Fields */}
           <MeetingMetadataInputs
             metadata={meetingMetadata}
             onChange={handleMetadataChange}
             disabled={isProcessing || isCompressingBeforeUpload}
           />
 
-          {/* Language & Output Format Controls */}
           <LanguageControls
             minutesLanguage={minutesLanguage}
             setMinutesLanguage={setMinutesLanguage}
@@ -331,7 +365,6 @@ export default function App() {
             disabled={isProcessing || isCompressingBeforeUpload}
           />
 
-          {/* Error Message */}
           {error && (
             <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-4 flex items-start gap-3 text-rose-300 text-xs sm:text-sm">
               <AlertTriangle className="w-5 h-5 text-rose-400 shrink-0 mt-0.5" />
@@ -342,7 +375,6 @@ export default function App() {
             </div>
           )}
 
-          {/* Action Trigger Button */}
           <div className="flex items-center justify-center pt-2">
             <button
               type="button"
@@ -373,7 +405,6 @@ export default function App() {
             </button>
           </div>
 
-          {/* Active UI Status Indicator during In-Browser Compression */}
           {isCompressingBeforeUpload && (
             <div className="max-w-md mx-auto bg-slate-900 border border-sky-500/40 rounded-xl p-4 shadow-lg text-center space-y-2.5 animate-pulse">
               <div className="flex items-center justify-center gap-2 text-sky-400 text-xs font-semibold">
@@ -394,7 +425,6 @@ export default function App() {
             </div>
           )}
 
-          {/* Live Progress Indicator during Minutes Generation */}
           {isProcessing && !isCompressingBeforeUpload && (
             <div className="max-w-md mx-auto bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg text-center space-y-2.5">
               <div className="flex items-center justify-center gap-2 text-sky-400 text-xs font-semibold">
@@ -419,7 +449,6 @@ export default function App() {
         {/* Results Presentation */}
         {result && (
           <div className="space-y-6 pt-4 border-t border-slate-800/80">
-            {/* View Mode Switcher */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-900/80 border border-slate-800 rounded-xl p-2">
               <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-lg border border-slate-800">
                 <button
@@ -526,18 +555,18 @@ export default function App() {
               </div>
             </div>
 
-            {/* Language & Cultural Insights Card */}
             {result.languageAnalysis && (
               <CreoleGlossary analysis={result.languageAnalysis} />
             )}
 
-            {/* Content Display based on View Mode */}
             {viewMode === 'split' && (
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-start">
                 <VerbatimTranscript 
                   transcript={result.verbatimTranscript} 
                   speakersIdentified={result.speakersIdentified} 
                   result={result}
+                  audioBlob={audioData?.file || null}
+                  onRenameSpeaker={handleRenameSpeaker}
                 />
                 <ExecutiveMinutes result={result} />
               </div>
@@ -555,6 +584,8 @@ export default function App() {
                   transcript={result.verbatimTranscript} 
                   speakersIdentified={result.speakersIdentified} 
                   result={result}
+                  audioBlob={audioData?.file || null}
+                  onRenameSpeaker={handleRenameSpeaker}
                 />
               </div>
             )}
