@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   Sparkles, 
   FileText, 
@@ -50,18 +50,24 @@ export default function App() {
     timeEnded: '',
     venue: '',
   });
+  const [isInitialBoot, setIsInitialBoot] = useState(true);
   const [isProcessing, setIsProcessing] = useState(false);
   const [processingStep, setProcessingStep] = useState(0);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<MeetingAnalysisResult | null>(null);
   const [viewMode, setViewMode] = useState<'split' | 'minutes' | 'transcript' | 'markdown'>('split');
 
+  useEffect(() => {
+    const timer = window.setTimeout(() => setIsInitialBoot(false), 350);
+    return () => window.clearTimeout(timer);
+  }, []);
+
   const processingSteps = [
-    'Preparing audio payload (16kHz Mono)...',
-    'Ingesting audio stream with Gemini 2.5 Flash...',
-    'Auto-detecting Creole dialect & code-switching verbatim line-by-line...',
-    'Synthesizing executive meeting minutes with decisions & action items...',
-    'Finalizing dynamic dialect insights, glossary, and metadata...',
+    'Optimizing your audio recording for crystal-clear speech recognition...',
+    'Listening to the conversation and identifying distinct voices...',
+    'Transcribing Mauritian Creole, French, and English dialogue verbatim...',
+    'Summarizing key decisions, action items, and executive minutes...',
+    'Polishing your minutes and preparing Word & PDF exports...',
   ];
 
   const handleAudioSelected = (data: AudioSelectionData) => {
@@ -158,7 +164,7 @@ export default function App() {
   };
 
   const [isCompressingBeforeUpload, setIsCompressingBeforeUpload] = useState(false);
-  const [compressionStatusText, setCompressionStatusText] = useState('Compressing audio file for upload...');
+  const [compressionStatusText, setCompressionStatusText] = useState('Optimizing your audio recording...');
   const [compressionProgressPercent, setCompressionProgressPercent] = useState(0);
   const [clientDirectStatus, setClientDirectStatus] = useState('');
   const [markdownCopied, setMarkdownCopied] = useState(false);
@@ -175,7 +181,7 @@ export default function App() {
 
     if (!isAlreadyCompressed && isLarge) {
       setIsCompressingBeforeUpload(true);
-      setCompressionStatusText('Compressing audio file for upload... (reading audio stream)');
+      setCompressionStatusText('Optimizing your audio recording...');
       setCompressionProgressPercent(15);
 
       try {
@@ -206,7 +212,7 @@ export default function App() {
 
     setIsProcessing(true);
     setProcessingStep(0);
-    setClientDirectStatus('Connecting directly to Gemini API from browser...');
+    setClientDirectStatus('Starting transcription engine...');
 
     const stepInterval = setInterval(() => {
       setProcessingStep(prev => (prev < processingSteps.length - 1 ? prev + 1 : prev));
@@ -406,12 +412,12 @@ export default function App() {
               {isCompressingBeforeUpload ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
-                  <span>Compressing Audio...</span>
+                  <span>Uploading &amp; Optimizing Audio...</span>
                 </>
               ) : isProcessing ? (
                 <>
                   <Loader2 className="w-4 h-4 animate-spin text-slate-950" />
-                  <span>Generating Minutes...</span>
+                  <span>Creating Your Meeting Minutes...</span>
                 </>
               ) : (
                 <>
@@ -426,7 +432,7 @@ export default function App() {
             <div className="max-w-md mx-auto bg-slate-900 border border-sky-500/40 rounded-xl p-4 shadow-lg text-center space-y-2.5 animate-pulse">
               <div className="flex items-center justify-center gap-2 text-sky-400 text-xs font-semibold">
                 <Loader2 className="w-4 h-4 animate-spin text-sky-400" />
-                <span>Compressing audio file for upload...</span>
+                <span>Uploading &amp; optimizing audio...</span>
               </div>
               <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
                 <div
@@ -446,7 +452,7 @@ export default function App() {
             <div className="max-w-md mx-auto bg-slate-900 border border-slate-800 rounded-xl p-4 shadow-lg text-center space-y-2.5">
               <div className="flex items-center justify-center gap-2 text-sky-400 text-xs font-semibold">
                 <Loader2 className="w-4 h-4 animate-spin" />
-                <span>Generating Minutes... (Direct Client API)</span>
+                <span>Creating Your Meeting Minutes...</span>
               </div>
               <div className="w-full bg-slate-800 rounded-full h-1.5 overflow-hidden">
                 <div
@@ -644,6 +650,33 @@ export default function App() {
           </div>
         )}
       </main>
+
+      {/* Black Background with Circular Ring Loader */}
+      {(isInitialBoot || isCompressingBeforeUpload || isProcessing) && (
+        <div
+          className="fixed inset-0 z-50 bg-black flex flex-col items-center justify-center px-6 text-center select-none"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="relative w-20 h-20 flex items-center justify-center">
+            <div className="w-20 h-20 rounded-full border-4 border-neutral-800" />
+            <div className="w-20 h-20 rounded-full border-4 border-transparent border-t-sky-400 animate-spin absolute inset-0" />
+          </div>
+
+          <p className="mt-5 text-sm font-semibold text-white tracking-wide">
+            {isInitialBoot
+              ? 'Loading MorisMinutes...'
+              : isCompressingBeforeUpload
+                ? 'Uploading & optimizing audio...'
+                : clientDirectStatus || processingSteps[processingStep] || 'Creating Your Meeting Minutes...'}
+          </p>
+          <p className="mt-1.5 text-xs text-neutral-400">
+            {isCompressingBeforeUpload
+              ? compressionStatusText
+              : 'Please keep this window open while your recording is processed.'}
+          </p>
+        </div>
+      )}
 
       {/* Footer */}
       <footer className="border-t border-slate-900 bg-slate-950 py-6 text-center text-xs text-slate-400">
