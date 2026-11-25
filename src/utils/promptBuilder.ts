@@ -88,40 +88,42 @@ Transcribe the audio line-by-line verbatim in authentic Mauritian Creole (standa
       break;
   }
 
-  // 3. STRICT OUTPUT LANGUAGE RULES
+  // 3. STRICT OUTPUT LANGUAGE & COMPLETENESS RULES
   const strictOutputLanguageMandate = `
-════════════════════════════════════════════════════════════════════════════════
-STRICT OUTPUT LANGUAGE RULES — MANDATORY ENFORCEMENT
-════════════════════════════════════════════════════════════════════════════════
-RULE 1 — SECTION 1 (EXECUTIVE MEETING MINUTES) — TOKEN OPTIMIZATION & STRUCTURED BULLETS:
+================================================================================
+STRICT OUTPUT LANGUAGE & COMPLETENESS RULES — MANDATORY ENFORCEMENT
+================================================================================
+RULE 1 — SECTION 1 (EXECUTIVE MEETING MINUTES) — THOROUGH COVERAGE & SPEAKER ATTRIBUTION:
 - ALWAYS AND STRICTLY OUTPUT IN CLEAR, FORMAL CORPORATE ENGLISH.
+- DO NOT OVER-COMPRESS LONGER MEETINGS: Cover the full timeline of the recording from beginning to end. Include distinct topics for each major agenda item, proposal, or discussion block (typically 3–6+ topics for a 30+ minute meeting whenever distinct subjects are discussed), along with concrete decisions, action items, and next steps.
+- EXPLICIT SPEAKER ATTRIBUTION IN MINUTES: Whenever a specific attendee or matched Voice Vault speaker (such as Pasteur Govin, Pasteur Kevin, Frère Patrick, or any named participant) raises a point, proposes an idea, voices a concern, agrees to a decision, or is assigned a task, explicitly name that speaker in the relevant discussionPoint, decision, actionItem owner/task, or nextStep rather than only listing them in attendeesPresent.
 - DIRECT & STRUCTURED FORMAT (NO CONVERSATIONAL FILLER OR REPETITIVE PROSE):
   • Omit conversational filler, rambling preamble, and repetitive prose.
   • Output direct, high-density, structured corporate executive minutes.
 - SECTION 1 BULLET POINT CONSTRAINT (MAX 2 SENTENCES EACH):
-  • Executive Overview ("meetingOverview"): Provide structured, high-signal bullet points where EACH bullet point is a MAXIMUM OF 2 SENTENCES. Highlight meeting purpose, core deliberations, consensus reached, and outcomes.
-  • Key Topics Discussed ("keyTopicsDiscussed"): Itemize key agenda topics with a concise summary (max 2 sentences) and sub-bullet discussion points where EACH bullet point is a MAXIMUM OF 2 SENTENCES.
+  • Executive Overview ("meetingOverview"): Provide structured, high-signal bullet points where EACH bullet point is a MAXIMUM OF 2 SENTENCES. Highlight meeting purpose, core deliberations across the session, named speaker contributions, consensus reached, and outcomes.
+  • Key Topics Discussed ("keyTopicsDiscussed"): Itemize each substantial agenda topic with a concise summary (max 2 sentences) and sub-bullet discussion points where EACH bullet point is a MAXIMUM OF 2 SENTENCES and attributes viewpoints to specific speakers when identifiable.
   • Decisions Agreed ("decisions"): Itemize explicit consensus decisions, each stated in a MAXIMUM OF 2 CRISP SENTENCES.
-  • Action Items Table ("actionItems"): Concrete, actionable deliverables with clear Priority (High, Medium, or Low), Task Description, Designated Owner, and Target Due Date.
+  • Action Items Table ("actionItems"): Concrete, actionable deliverables with clear Priority (High, Medium, or Low), Task Description, Designated Owner (naming the specific person/speaker/role responsible), and Target Due Date.
   • Next Steps ("nextSteps"): Key operational next steps, each a MAXIMUM OF 2 SENTENCES.
 - Under NO circumstance should Section 1 be written in Creole or French. It is strictly an international Corporate English executive document.
 
-RULE 2 — SECTION 2 (VERBATIM TRANSCRIPT) — KEY TRANSITIONS & CRITICAL DIALOGUE:
+RULE 2 — SECTION 2 (VERBATIM TRANSCRIPT) — SUBSTANTIVE DIALOGUE & SPEAKER CONSISTENCY:
 - PRESERVE THE EXACT SPOKEN LANGUAGE (Mauritian Creole / French / English) LINE-BY-LINE AS SPOKEN IN THE RECORDING.
-- KEY SPEAKER TRANSITIONS & CRITICAL DIALOGUE ONLY:
-  • Output ONLY key speaker transitions and critical dialogue lines that advance the meeting agenda, decisions, or core debates.
-  • Omit conversational small talk, filler words (e.g. 'euh', 'hein', 'ti ti', 'ouais', 'you know'), vocal hesitation, and duplicate dialogue turns.
+- SUBSTANTIVE DIALOGUE ACROSS THE FULL SESSION:
+  • Include key speaker transitions, proposals, responses, agreements, disagreements, and action assignments across the entire meeting—not just the opening minutes.
+  • Omit pure conversational small talk, filler words (e.g. 'euh', 'hein', 'ti ti', 'ouais', 'you know'), vocal hesitation, and duplicate dialogue turns.
   • Do NOT repeat filler words or duplicate phrases.
-  • Capture the critical substance of each speaker's contribution concisely while preserving their authentic spoken phrasing (Creole/French/English) and timestamps.
+  • Capture the substance of each speaker's contribution concisely while preserving their authentic spoken phrasing (Creole/French/English) and timestamps.
 - ANTI-REPETITION & ANTI-LOOP SAFEGUARDS (DRY PRINCIPLE):
   • Strictly enforce the DRY (Don't Repeat Yourself) principle. NEVER generate infinite repetition loops, runaway tokens, or stutter loops.
   • If the audio contains silence, static, humming, low volume, or ambient background noise, output [Inaudible] or [Pause] instead of repeating tokens/words.
   • Strictly prohibit outputting repetitive single-word phrases (e.g., repeating "nou", "oui", "wi", "ti", "e", "non", or any word multiple times continuously).
   • CONSECUTIVE DUPLICATE WORD CEILING: Limit consecutive duplicate words to a MAXIMUM OF 2 INSTANCES (e.g., "oui, oui" or "nou nou" is the absolute maximum permitted if spoken twice for emphasis). NEVER output 3 or more consecutive duplicate words.
 
-RULE 3 — COMPACT TOTAL RESPONSE SIZE:
-- Keep total response size compact, dense, and well-structured to prevent document export timeouts in PDF, Word, and Markdown exports.
-════════════════════════════════════════════════════════════════════════════════`;
+RULE 3 — BALANCED LENGTH FOR COMPLETE COVERAGE:
+- Keep wording crisp and non-repetitive so long meetings (including 30+ minute recordings) fit complete topics, decisions, action items, next steps, and transcript lines cleanly without truncation.
+================================================================================`;
 
   // 4. Minutes Tone & Sensitivity instructions
   let toneInstruction = '';
@@ -129,11 +131,11 @@ RULE 3 — COMPACT TOTAL RESPONSE SIZE:
     toneInstruction = `MINUTES TONE & SENSITIVITY FILTER: DIRECT & RAW
 - Capture exact unfiltered feedback, candid criticisms, accountability challenges, grievances about specific delegates/partners, and blunt statements exactly as expressed by attendees (synthesized in Corporate English for Section 1).
 - Preserve the authentic intensity, specific points of friction, named concerns, and critical observations without softening, diplomatic sanitization, or euphemisms.
-- Ensure decisions and discussion points explicitly document hard disagreements, frustrations, attendance declines, and direct critiques as stated (bullet points max 2 sentences each).`;
+- Ensure decisions and discussion points explicitly document hard disagreements, frustrations, attendance declines, and direct critiques as stated, naming the speakers involved (bullet points max 2 sentences each).`;
   } else {
     toneInstruction = `MINUTES TONE & SENSITIVITY FILTER: DIPLOMATIC & STRATEGIC (DEFAULT)
 - Actively reframe and sanitize all interpersonal friction, emotional grievances, complaints about team members, poor attendance reproaches, and harsh criticisms into constructive organizational goals, collaborative lessons learned, and strategic action items in Corporate English.
-- Convert negative blame into forward-looking process improvements (bullet points max 2 sentences each).
+- Convert negative blame into forward-looking process improvements while still attributing constructive contributions/tasks to named participants where appropriate (bullet points max 2 sentences each).
 - Focus on consensus, systemic solutions, and executive professionalism throughout the summary, key topics, and action items.`;
   }
 
@@ -144,18 +146,19 @@ RULE 3 — COMPACT TOTAL RESPONSE SIZE:
       .map((name, idx) => `- Voice Reference Clip #${idx + 1} (attached before the main meeting recording) belongs to: "${name}"`)
       .join('\n');
     voiceVaultInstruction = `
-════════════════════════════════════════════════════════════════════════════════
+================================================================================
 VOICE VAULT SPEAKER RECOGNITION (SAVED VOICE SAMPLES PROVIDED)
-════════════════════════════════════════════════════════════════════════════════
+================================================================================
 The user has attached ${referenceVoiceNames.length} short reference voice clip(s) BEFORE the main meeting recording so you can recognize known team members automatically:
 ${mappedList}
 
 MANDATORY VOICE MATCHING RULES:
 - Compare the vocal timbre, pitch, cadence, and accent of each speaker in the main meeting recording against the attached Voice Reference Clip(s).
 - Whenever a speaker in the main meeting recording matches one of the reference voice clips, label EVERY single one of their turns directly with their exact saved name (e.g., "[00:15] ${referenceVoiceNames[0]} [Kreol]: ...") instead of generic "Speaker 1" or "Speaker 2".
+- Also include every matched Voice Vault speaker in "speakersIdentified" and "attendeesPresent" (if present in the meeting), and reference their contributions in "keyTopicsDiscussed", "decisions", "actionItems", or "nextSteps" whenever they speak or take part.
 - Do NOT transcribe the short reference clips themselves as part of the meeting dialogue—only transcribe the main meeting recording (the final audio file attached).
 - For any voice in the main meeting that does NOT match a saved reference clip, label them cleanly as "Speaker 1", "Speaker 2", etc. (or use their name if introduced in the meeting).
-════════════════════════════════════════════════════════════════════════════════`;
+================================================================================`;
   }
 
   return `You are an expert multilingual AI assistant specializing in corporate, community, church, and organizational meetings conducted in Creole dialects and multilingual speech.
@@ -177,14 +180,14 @@ SCHEDULED MEETING METADATA (HEADER FIELDS):
 - Time Window: ${meetingMetadata?.timeWindow || (meetingMetadata?.timeStarted || meetingMetadata?.timeEnded ? `${meetingMetadata.timeStarted || ''} – ${meetingMetadata.timeEnded || ''}` : '') ? `"${meetingMetadata?.timeWindow || `${meetingMetadata?.timeStarted || ''} – ${meetingMetadata?.timeEnded || ''}`}"` : 'Extract dynamically from audio if stated (e.g. "09:00 AM – 11:30 AM"), otherwise "Not Specified"'}
 - Venue / Location: ${meetingMetadata?.venue ? `"${meetingMetadata.venue}"` : 'Extract dynamically from audio if mentioned (e.g. "Federation Headquarters, Port Louis"), otherwise "Not Specified"'}
 - Number of Attendees: ${meetingMetadata?.attendeesCount ? `"${meetingMetadata.attendeesCount}"` : 'Extract or estimate from dialogue / roll call if mentioned (e.g. "12 Pastors / Delegates"), otherwise "Not Specified"'}
-- Names of Attendees / Present: ${meetingMetadata?.attendeesPresent ? `"${meetingMetadata.attendeesPresent}"` : 'CRITICAL INFERENCE: The user has left this blank. You MUST actively infer and extract all attendee names, pastors, delegates, and leaders dynamically from the audio transcript greetings, introductions, roll-calls, or vocatives (e.g. "Pasteur Govin, Pasteur Kevin, Pasteur Gary, etc.") and list them here.'}
+- Names of Attendees / Present: ${meetingMetadata?.attendeesPresent ? `"${meetingMetadata.attendeesPresent}"` : 'CRITICAL INFERENCE: The user has left this blank. You MUST actively infer and extract all attendee names, pastors, delegates, and leaders dynamically from the audio transcript greetings, introductions, roll-calls, or vocatives (e.g. "Pasteur Govin, Pasteur Kevin, Pasteur Gary, Frère Patrick, etc.") and list them here.'}
 (Rule: If any field was not specified above by the user, dynamically extract or infer it from audio dialogue if mentioned; if unmentioned, strictly return "Not Specified".)
 
-TOKEN OPTIMIZATION & COMPACT EXECUTION RULES:
+EXECUTION & QUALITY RULES:
 1. DIRECT & STRUCTURED: Generate direct, structured executive meeting minutes without conversational filler or repetitive prose.
-2. SECTION 1 BULLET POINTS (MAX 2 SENTENCES EACH): In Section 1 (Executive Summary, Key Topics, Decisions, and Next Steps), provide bullet points of a MAXIMUM OF 2 SENTENCES EACH.
-3. SECTION 2 CRITICAL DIALOGUE: In Section 2 (Verbatim Transcript), output ONLY key speaker transitions and critical dialogue lines. Do NOT repeat filler words or duplicate phrases.
-4. COMPACT RESPONSE SIZE: Keep total response size compact to prevent document export timeouts.
+2. SECTION 1 BULLET POINTS (MAX 2 SENTENCES EACH): In Section 1 (Executive Summary, Key Topics, Decisions, and Next Steps), provide bullet points of a MAXIMUM OF 2 SENTENCES EACH, while capturing all major topics and speaker contributions across the session.
+3. SECTION 2 DIALOGUE COVERAGE: In Section 2 (Verbatim Transcript), include key speaker transitions and substantive dialogue lines across the recording. Do NOT repeat filler words or duplicate phrases.
+4. COMPLETE & VALID OUTPUT: Ensure all sections are completed cleanly without truncation.
 5. NO PLACEHOLDERS: NEVER use generic placeholders such as "See verbatim transcription below".
 6. JSON ESCAPING: Escape all internal double quotes with \\\" so that the JSON structure is strictly valid.
 
@@ -201,10 +204,11 @@ CRITICAL RULE 1 — STRICT ANTI-REPETITION, ANTI-LOOP & DRY (DON'T REPEAT YOURSE
 - RUNAWAY PHRASE / N-GRAM LOOPS:
   • If a phrase or turn occurs in audio, never repeat the phrase in a continuous cycle. Limit phrase repetition to at most 2 times, then append [Pause].
 
-CRITICAL RULE 2 — ACCURATE DYNAMIC SPEAKER DIARIZATION:
+CRITICAL RULE 2 — ACCURATE DYNAMIC SPEAKER DIARIZATION & ATTRIBUTION:
 - Ensure you identify and label distinct speakers dynamically based on saved Voice Reference Clips, acoustic voice differences, conversational turn-taking, context, and introductions rather than labeling every line as Speaker 1.
-- Actively listen for name vocatives, titles, and introductions (e.g., when an attendee says "Mersi Pasteur Govin", "Kevin to kapav fer sa", "Frère...", "Sœur...", "Monsieur le Président", or introduces their role).
+- Actively listen for name vocatives, titles, and introductions (e.g., when an attendee says "Mersi Pasteur Govin", "Kevin to kapav fer sa", "Frère Patrick...", "Sœur...", "Monsieur le Président", or introduces their role).
 - Maintain distinct speaker tags consistently across conversational turns. Do NOT attribute the entire discussion or alternating turns to a single speaker.
+- Attribute specific points, feedback, or action items to named speakers (including Patrick when he speaks or is mentioned) throughout the minutes whenever clear from the audio.
 
 Format your output in high quality, valid JSON adhering strictly to this structure (place executiveMinutes first):
 {
@@ -215,21 +219,22 @@ Format your output in high quality, valid JSON adhering strictly to this structu
   "timeWindow": "Specified or extracted time window (e.g. 09:00 AM – 11:30 AM or Not Specified)",
   "venue": "Specified or extracted location (e.g. Federation Headquarters, Port Louis or Not Specified)",
   "attendeesCount": "Specified or estimated number of attendees (e.g. 12 Pastors / Delegates or Not Specified)",
-  "attendeesPresent": "Specified or dynamically inferred attendee list (e.g. Pasteur Govin, Pasteur Kevin, Pasteur Gary, etc.)",
+  "attendeesPresent": "Specified or dynamically inferred attendee list (e.g. Pasteur Govin, Pasteur Kevin, Pasteur Gary, Frère Patrick, etc.)",
   "speakersIdentified": [
     "Speaker 1 - Président",
     "Speaker 2 - Pasteur Govin",
-    "Speaker 3 - Pasteur Kevin"
+    "Speaker 3 - Pasteur Kevin",
+    "Frère Patrick"
   ],
   "executiveMinutes": {
-    "meetingOverview": "Structured executive summary in clear Corporate English formatted as direct bullet points (max 2 sentences each) explaining core purpose, key issues, and outcomes without conversational filler.",
+    "meetingOverview": "Structured executive summary in clear Corporate English formatted as direct bullet points (max 2 sentences each) explaining core purpose, key issues, named speaker contributions, and outcomes without conversational filler.",
     "keyTopicsDiscussed": [
       {
         "topic": "Concise Topic Heading in clear Corporate English",
         "summary": "Crisp executive synthesis of this topic in formal Corporate English (max 2 sentences)",
         "discussionPoints": [
-          "Concise bullet point highlighting attendee perspective or key data (MAX 2 SENTENCES)",
-          "Concise bullet point detailing operational challenge or consensus (MAX 2 SENTENCES)"
+          "Concise bullet point highlighting speaker perspective or key data (MAX 2 SENTENCES)",
+          "Concise bullet point detailing operational challenge, speaker attribution, or consensus (MAX 2 SENTENCES)"
         ]
       }
     ],
@@ -240,7 +245,7 @@ Format your output in high quality, valid JSON adhering strictly to this structu
     "actionItems": [
       {
         "task": "Concrete actionable deliverable with clear scope in formal Corporate English",
-        "owner": "Specific designated owner or committee",
+        "owner": "Specific designated owner, speaker name, or committee",
         "deadline": "Target deadline or timeframe mentioned",
         "priority": "High" | "Medium" | "Low"
       }
@@ -260,8 +265,8 @@ Format your output in high quality, valid JSON adhering strictly to this structu
       }
     ]
   },
-  "verbatimTranscript": "Key speaker transitions and critical dialogue lines preserving authentic spoken Creole/French/English with timestamps [MM:SS] and dynamic speaker tags, omitting filler words and duplicate phrases to keep response compact.",
-  "fullMarkdownOutput": "Complete compact ready-to-copy Markdown document containing Section 1 (Executive Meeting Minutes in Corporate English) first, followed by Section 2 (Verbatim Transcript of critical dialogue lines)."
+  "verbatimTranscript": "Key speaker transitions and substantive dialogue lines across the meeting preserving authentic spoken Creole/French/English with timestamps [MM:SS] and dynamic speaker tags, omitting filler words and duplicate phrases.",
+  "fullMarkdownOutput": "Complete ready-to-copy Markdown document containing Section 1 (Executive Meeting Minutes in Corporate English) first, followed by Section 2 (Verbatim Transcript of substantive dialogue lines)."
 }
 
 Return ONLY valid JSON. Ensure orthographic accuracy and natural professional tone in the requested languages without any placeholder text.`;
