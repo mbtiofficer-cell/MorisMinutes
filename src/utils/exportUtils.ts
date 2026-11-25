@@ -9,7 +9,6 @@ import {
   TableCell,
   WidthType,
   BorderStyle,
-  AlignmentType,
   HeadingLevel,
   PageBreak,
   ShadingType,
@@ -31,6 +30,18 @@ function sanitizeForPdf(raw: string): string {
     .replace(/\r/g, '\n');
 }
 
+function getTranscriptSource(result: MeetingAnalysisResult): string {
+  const cleanedVerbatim = cleanVerbatimTranscript(result.verbatimTranscript || '').trim();
+  if (cleanedVerbatim.length > 0) {
+    return cleanedVerbatim;
+  }
+  const fallbackMarkdown = (result.fullMarkdownOutput || '').trim();
+  if (fallbackMarkdown.length > 0) {
+    return fallbackMarkdown;
+  }
+  return 'No verbatim transcript recorded.';
+}
+
 function generateMarkdownString(result: MeetingAnalysisResult): string {
   const lines: string[] = [];
   lines.push(`# ${result.meetingTitle || 'Meeting Minutes'}`);
@@ -43,7 +54,7 @@ function generateMarkdownString(result: MeetingAnalysisResult): string {
   lines.push(result.executiveMinutes?.meetingOverview || '');
   lines.push('');
   lines.push('## 2. Verbatim Transcript');
-  lines.push(cleanVerbatimTranscript(result.verbatimTranscript || ''));
+  lines.push(getTranscriptSource(result));
   return lines.join('\n');
 }
 
@@ -463,7 +474,7 @@ export async function exportToWord(result: MeetingAnalysisResult): Promise<void>
     })
   );
 
-  const transcriptLines = cleanVerbatimTranscript(result.verbatimTranscript || '')
+  const transcriptLines = getTranscriptSource(result)
     .split('\n')
     .map((l) => l.trim())
     .filter((l) => l.length > 0);
@@ -703,7 +714,7 @@ export function generateMeetingPDFDoc(result: MeetingAnalysisResult): jsPDF {
   doc.text('Meeting Overview', margin, cursorY);
   cursorY += 14;
 
-  const overviewText = result.executiveMinutes.meetingOverview || 'Overview recorded in session audio.';
+  const overviewText = result.executiveMinutes?.meetingOverview || 'Overview recorded in session audio.';
   printWrappedLines(overviewText, margin, contentWidth, 13, {
     fontName: 'helvetica',
     fontStyle: 'normal',
@@ -712,7 +723,7 @@ export function generateMeetingPDFDoc(result: MeetingAnalysisResult): jsPDF {
   });
   cursorY += 14;
 
-  if (result.executiveMinutes.keyTopicsDiscussed && result.executiveMinutes.keyTopicsDiscussed.length > 0) {
+  if (result.executiveMinutes?.keyTopicsDiscussed && result.executiveMinutes.keyTopicsDiscussed.length > 0) {
     ensureSpace(45);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(10.5);
@@ -743,7 +754,7 @@ export function generateMeetingPDFDoc(result: MeetingAnalysisResult): jsPDF {
       }
 
       if (topic.discussionPoints && topic.discussionPoints.length > 0) {
-        topic.discussionPoints.forEach(point => {
+        topic.discussionPoints.forEach((point) => {
           ensureSpace(16);
           const sanitizedPoint = sanitizeForPdf(point);
           const bulletLines = doc.splitTextToSize(`- ${sanitizedPoint}`, contentWidth - 24);
@@ -765,7 +776,7 @@ export function generateMeetingPDFDoc(result: MeetingAnalysisResult): jsPDF {
     cursorY += 8;
   }
 
-  if (result.executiveMinutes.decisions && result.executiveMinutes.decisions.length > 0) {
+  if (result.executiveMinutes?.decisions && result.executiveMinutes.decisions.length > 0) {
     ensureSpace(45);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(10.5);
@@ -773,7 +784,7 @@ export function generateMeetingPDFDoc(result: MeetingAnalysisResult): jsPDF {
     doc.text('Decisions Agreed', margin, cursorY);
     cursorY += 14;
 
-    result.executiveMinutes.decisions.forEach(decision => {
+    result.executiveMinutes.decisions.forEach((decision) => {
       ensureSpace(24);
       const sanitizedDec = sanitizeForPdf(decision);
       const decLines = doc.splitTextToSize(`[AGREED] ${sanitizedDec}`, contentWidth - 14);
@@ -799,7 +810,7 @@ export function generateMeetingPDFDoc(result: MeetingAnalysisResult): jsPDF {
     cursorY += 10;
   }
 
-  if (result.executiveMinutes.actionItems && result.executiveMinutes.actionItems.length > 0) {
+  if (result.executiveMinutes?.actionItems && result.executiveMinutes.actionItems.length > 0) {
     ensureSpace(65);
     doc.setFont('helvetica', 'bold');
     doc.setFontSize(10.5);
@@ -916,6 +927,33 @@ export function generateMeetingPDFDoc(result: MeetingAnalysisResult): jsPDF {
     cursorY += 12;
   }
 
+  if (result.executiveMinutes?.nextSteps && result.executiveMinutes.nextSteps.length > 0) {
+    ensureSpace(45);
+    doc.setFont('helvetica', 'bold');
+    doc.setFontSize(10.5);
+    doc.setTextColor(15, 23, 42);
+    doc.text('Next Steps', margin, cursorY);
+    cursorY += 14;
+
+    result.executiveMinutes.nextSteps.forEach((step) => {
+      ensureSpace(20);
+      const sanitizedStep = sanitizeForPdf(step);
+      const stepLines = doc.splitTextToSize(`- ${sanitizedStep}`, contentWidth - 14);
+      for (let sIdx = 0; sIdx < stepLines.length; sIdx++) {
+        if (cursorY + 12 > maxY) {
+          addNewPage();
+        }
+        doc.setFont('helvetica', 'normal');
+        doc.setFontSize(9);
+        doc.setTextColor(30, 41, 59);
+        doc.text(stepLines[sIdx], margin + 8, cursorY);
+        cursorY += 12;
+      }
+      cursorY += 3;
+    });
+    cursorY += 10;
+  }
+
   addNewPage();
 
   doc.setFont('helvetica', 'bold');
@@ -939,12 +977,12 @@ export function generateMeetingPDFDoc(result: MeetingAnalysisResult): jsPDF {
   doc.line(margin, cursorY, pageWidth - margin, cursorY);
   cursorY += 16;
 
-  const rawTranscriptLines = cleanVerbatimTranscript(result.verbatimTranscript || '')
+  const rawTranscriptLines = getTranscriptSource(result)
     .split('\n')
-    .map(l => l.trim())
-    .filter(l => l.length > 0);
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0);
 
-  rawTranscriptLines.forEach(rawLine => {
+  rawTranscriptLines.forEach((rawLine) => {
     const cleanLine = sanitizeForPdf(rawLine);
     if (!cleanLine) return;
 
