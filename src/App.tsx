@@ -16,6 +16,7 @@ import {
 } from 'lucide-react';
 import { AudioUploader } from './components/AudioUploader';
 import { AudioPlayer } from './components/AudioPlayer';
+import { PreGenerationVoiceTagger } from './components/PreGenerationVoiceTagger';
 import { VerbatimTranscript } from './components/VerbatimTranscript';
 import { ExecutiveMinutes } from './components/ExecutiveMinutes';
 import { CreoleGlossary } from './components/CreoleGlossary';
@@ -75,6 +76,13 @@ export default function App() {
     setAudioData(null);
     setResult(null);
     setError(null);
+  };
+
+  const handlePreGenVoiceSaved = (savedName: string) => {
+    setMeetingContext((prev) => {
+      if (prev.toLowerCase().includes(savedName.toLowerCase())) return prev;
+      return prev.trim() ? `${prev.trim()}, ${savedName}` : `Speakers present: ${savedName}`;
+    });
   };
 
   const handleRenameSpeaker = (oldName: string, newName: string) => {
@@ -340,13 +348,22 @@ export default function App() {
           />
 
           {audioData && (
-            <AudioPlayer
-              audioUrl={audioData.objectUrl}
-              filename={audioData.name}
-              filesize={audioData.sizeFormatted}
-              originalFilesize={audioData.originalSizeFormatted}
-              compressionRatio={audioData.compressionRatio}
-            />
+            <>
+              <AudioPlayer
+                audioUrl={audioData.objectUrl}
+                filename={audioData.name}
+                filesize={audioData.sizeFormatted}
+                originalFilesize={audioData.originalSizeFormatted}
+                compressionRatio={audioData.compressionRatio}
+              />
+
+              <PreGenerationVoiceTagger
+                audioUrl={audioData.objectUrl}
+                audioBlob={audioData.file}
+                disabled={isProcessing || isCompressingBeforeUpload}
+                onVoiceSaved={handlePreGenVoiceSaved}
+              />
+            </>
           )}
 
           <MeetingMetadataInputs
