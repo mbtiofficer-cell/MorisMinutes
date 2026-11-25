@@ -44,8 +44,8 @@ export async function getClientApiKey(): Promise<string> {
 async function waitForFileActive(ai: GoogleGenAI, fileObj: any, onStatus?: (msg: string) => void): Promise<any> {
   let fileState = fileObj.state;
   let pollCount = 0;
-  while ((fileState === 'PROCESSING' || !fileState) && pollCount < 30) {
-    onStatus?.(`Preparing audio in Gemini (${pollCount + 1}/30)...`);
+  while ((fileState === 'PROCESSING' || !fileState) && pollCount < 60) {
+    onStatus?.(`Preparing audio in Gemini (${pollCount + 1}/60)...`);
     await new Promise((resolve) => setTimeout(resolve, 1000));
     try {
       const fileCheck = await ai.files.get({ name: fileObj.name });
@@ -186,6 +186,7 @@ export async function generateMinutesDirectly(
 
     let response: any = null;
     let modelUsed = candidateModels[0];
+    const failureReasons: string[] = [];
 
     for (const modelCandidate of candidateModels) {
       for (let attempt = 1; attempt <= 2; attempt++) {
@@ -199,7 +200,7 @@ export async function generateMinutesDirectly(
             config: {
               responseMimeType: 'application/json',
               temperature: 0.15,
-              maxOutputTokens: 8192,
+              maxOutputTokens: 32768,
               thinkingConfig: { thinkingBudget: 0 },
             },
           });
@@ -218,11 +219,16 @@ export async function generateMinutesDirectly(
             response = res;
             modelUsed = modelCandidate;
             break;
+          } else {
+            const finishReason = res?.candidates?.[0]?.finishReason || 'EMPTY_TEXT';
+            failureReasons.push(`${modelCandidate} (attempt ${attempt}): empty response (${finishReason})`);
           }
         } catch (err: any) {
-          console.warn(`Direct client call to ${modelCandidate} (attempt ${attempt}) failed:`, err?.message);
+          const msg = err?.message || String(err);
+          console.warn(`Direct client call to ${modelCandidate} (attempt ${attempt}) failed:`, msg);
+          failureReasons.push(`${modelCandidate} (attempt ${attempt}): ${msg}`);
           if (attempt < 2) {
-            await new Promise((r) => setTimeout(r, 1000));
+            await new Promise((r) => setTimeout(r, 1500));
           }
         }
       }
@@ -244,8 +250,12 @@ export async function generateMinutesDirectly(
     onStatus?.('Formatting executive minutes...');
     const parsedData = parseMeetingJsonResponse(rawText, filename, minutesLanguage, opts.meetingMetadata);
 
+    if (!rawText && failureReasons.length > 0) {
+      parsedData.executiveMinutes.meetingOverview = `Gemini returned no output. Diagnostics: ${failureReasons.slice(-2).join(' | ')}`;
+    }
+
     return {
-      success: true,
+      success: Boolean(rawText),
       modelUsed,
       fileUriUsed: uploadedFile.uri,
       data: parsedData,
