@@ -1,4 +1,5 @@
 import { MeetingAnalysisResult, ActionItem, KeyTopic, CreoleExpression, MeetingMetadata } from '../types';
+import { cleanVerbatimTranscript } from './transcriptCleaner';
 
 /**
  * Robust JSON Parser & Resilient Extractor for Gemini Meeting Output.
@@ -22,8 +23,6 @@ export function stripMarkdownWrappers(raw: string): string {
   return str.trim();
 }
 
-import { cleanVerbatimTranscript } from './transcriptCleaner';
-
 /**
  * Post-processes transcript text to eliminate repetitive loops,
  * limiting consecutive duplicate words to a maximum of 2, removing phrase loops,
@@ -42,11 +41,11 @@ export function extractSpeakersFromTranscript(transcript: string): string[] {
   const speakerSet = new Set<string>();
 
   for (const line of lines) {
-    // Match "[00:05] Speaker 1 - Président [Kreol]:" or "[00:05] Speaker 1 - Président:"
+    // Match " Speaker 1 - Président [Kreol]:" or " Speaker 1 - Président:"
     const match = line.match(/^\[\d{1,2}:\d{2}(?::\d{2})?\]\s*([^:\[\n]+?)(?:\s*\[.*?\])?\s*:/);
     if (match && match[1]) {
       const name = match[1].trim();
-      if (name && !name.toLowerCase().startsWith('line #') && !name.toLowerCase().startsWith('↳')) {
+      if (name && !name.toLowerCase().startsWith('line #') && !name.startsWith('↳')) {
         speakerSet.add(name);
       }
     }
@@ -72,7 +71,7 @@ export function parseMeetingJsonResponse(
   userMetadata?: MeetingMetadata
 ): MeetingAnalysisResult {
   if (!rawText || !rawText.trim()) {
-    console.warn('Empty or blank Gemini API response received; safely building resilient structured minutes.');
+    console.warn('Empty or blank Gemini API response received; building clean fallback without sample data.');
     return buildResilientFallbackResult(filename, targetLanguage, userMetadata);
   }
 
@@ -233,18 +232,18 @@ function normalizeMeetingResult(
         topic: 'Executive Agenda Items',
         summary: minutes.meetingOverview || 'Comprehensive discussion recorded during the meeting session.',
         discussionPoints: [
-          'Detailed dialogue transcribed and analyzed across Mauritian multilingual speakers.',
+          'Detailed dialogue transcribed and analyzed across multilingual speakers.',
           'Consensus and action items detailed in the following sections.',
         ],
       },
     ];
   }
 
-  let decisions: string[] = Array.isArray(minutes.decisions)
+  const decisions: string[] = Array.isArray(minutes.decisions)
     ? minutes.decisions.filter((d: any) => typeof d === 'string' && !d.toLowerCase().includes('refer to the generated'))
     : [];
 
-  let actionItems: ActionItem[] = Array.isArray(minutes.actionItems)
+  const actionItems: ActionItem[] = Array.isArray(minutes.actionItems)
     ? minutes.actionItems.map((item: any) => ({
         task: item.task || 'Review documented discussion points',
         owner: item.owner || 'Meeting Attendees',
@@ -276,9 +275,9 @@ function normalizeMeetingResult(
     executiveMinutes: {
       meetingOverview: minutes.meetingOverview || 'Detailed executive synthesis of recorded discussions.',
       keyTopicsDiscussed: keyTopics,
-      decisions: decisions.length > 0 ? decisions : ['Refer to itemized discussion points for agreed outcomes.'],
-      actionItems: actionItems,
-      nextSteps: Array.isArray(minutes.nextSteps) ? minutes.nextSteps : ['Circulate minutes to all participants.'],
+      decisions: decisions.length > 0 ? decisions : ['No formal decisions recorded.'],
+      actionItems,
+      nextSteps: Array.isArray(minutes.nextSteps) ? minutes.nextSteps : [],
     },
     fullMarkdownOutput: obj.fullMarkdownOutput || '',
   };
@@ -339,7 +338,7 @@ function extractSemanticMeetingData(
   userMetadata?: MeetingMetadata
 ): MeetingAnalysisResult {
   // Extract Title
-  let title = filename ? `Meeting Minutes: ${filename.replace(/\.[^/.]+$/, '')}` : 'Executive Meeting Minutes';
+  let title = filename ? `Executive Minutes: ${filename.replace(/\.[^/.]+$/, '')}` : 'Executive Meeting Minutes';
   const titleMatch = rawText.match(/"meetingTitle":\s*"([^"]+)"/) || rawText.match(/#\s+(.+)/);
   if (titleMatch) {
     title = titleMatch[1].trim();
@@ -407,9 +406,8 @@ function extractSemanticMeetingData(
   }
 
   if (!overview) {
-    // Take first 1-2 paragraphs of text
     const paragraphs = rawText.split(/\n\s*\n/).filter((p) => !p.startsWith('{') && !p.startsWith('```') && p.length > 50);
-    overview = paragraphs[0] || 'Detailed analysis of multilingual meeting recording.';
+    overview = paragraphs[0] || 'Extracted meeting details from model output.';
   }
 
   // Extract Decisions
@@ -489,130 +487,76 @@ function extractSemanticMeetingData(
           topic: 'Meeting Deliberations',
           summary: overview,
           discussionPoints: [
-            'Directly extracted and documented from the recorded multilingual dialogue.',
-            'Key issues and operational consensus outlined in decisions and action deliverables.',
+            'Extracted from recorded multilingual dialogue.',
+            'Key outcomes and follow-ups listed below.',
           ],
         },
       ],
-      decisions: decisions.length > 0 ? decisions : ['Agreed on documented organizational milestones and next steps.'],
-      actionItems:
-        actionItems.length > 0
-          ? actionItems
-          : [
-              {
-                task: 'Review meeting minutes and follow up on designated deliverables',
-                owner: 'Executive Committee',
-                deadline: 'Next Meeting',
-                priority: 'High',
-              },
-            ],
-      nextSteps: ['Circulate documented executive summary to all attendees.'],
+      decisions,
+      actionItems,
+      nextSteps: [],
     },
     fullMarkdownOutput: rawText,
   };
 }
 
 /**
- * Builds a clean, resilient executive result when model response is completely empty,
- * guaranteeing the application never crashes with an unhandled UI error.
+ * Builds a clean fallback result when model response is empty,
+ * without injecting hardcoded sample meeting data.
  */
 export function buildResilientFallbackResult(
   filename?: string,
   targetLanguage: string = 'English',
   userMetadata?: MeetingMetadata
 ): MeetingAnalysisResult {
-  const date = userMetadata?.meetingDate?.trim() || new Date().toLocaleDateString('en-GB');
-  const timeWindow = userMetadata?.timeWindow?.trim() ||
-    (userMetadata?.timeStarted ? `${userMetadata.timeStarted} – ${userMetadata.timeEnded || ''}`.trim() : '09:00 AM – 11:30 AM');
-  const venue = userMetadata?.venue?.trim() || 'Federation Headquarters, Port Louis';
-  const attendeesCount = userMetadata?.attendeesCount?.trim() || '12 Pastors / Delegates';
-  const attendeesPresent = userMetadata?.attendeesPresent?.trim() || 'Pasteur Govin, Pasteur Kevin, Pasteur Gary, Frère Patrick';
-  const inferredSpeakers = attendeesPresent
-    .split(/[,;\n]/)
-    .map(s => s.trim())
-    .filter(Boolean);
+  const date = userMetadata?.meetingDate?.trim() || 'Not Specified';
+  const timeStarted = userMetadata?.timeStarted?.trim() || 'Not Specified';
+  const timeEnded = userMetadata?.timeEnded?.trim() || 'Not Specified';
+  const timeWindow =
+    userMetadata?.timeWindow?.trim() ||
+    (timeStarted !== 'Not Specified' || timeEnded !== 'Not Specified'
+      ? `${timeStarted !== 'Not Specified' ? timeStarted : ''}${timeStarted !== 'Not Specified' && timeEnded !== 'Not Specified' ? ' – ' : ''}${timeEnded !== 'Not Specified' ? timeEnded : ''}`.trim()
+      : 'Not Specified');
+  const venue = userMetadata?.venue?.trim() || 'Not Specified';
+  const attendeesCount = userMetadata?.attendeesCount?.trim() || 'Not Specified';
+  const attendeesPresent = userMetadata?.attendeesPresent?.trim() || 'Not Specified';
+  const inferredSpeakers = attendeesPresent !== 'Not Specified'
+    ? attendeesPresent.split(/[,;\n]/).map((s) => s.trim()).filter(Boolean)
+    : [];
 
   const metadata: MeetingMetadata = {
     meetingDate: date,
     timeWindow,
-    timeStarted: userMetadata?.timeStarted || '09:00 AM',
-    timeEnded: userMetadata?.timeEnded || '11:30 AM',
+    timeStarted,
+    timeEnded,
     venue,
     attendeesCount,
     attendeesPresent,
   };
 
   return {
-    meetingTitle: filename ? `Executive Minutes: ${filename.replace(/\.[^/.]+$/, '')}` : 'Executive Leadership Meeting Minutes',
+    meetingTitle: filename ? `Executive Minutes: ${filename.replace(/\.[^/.]+$/, '')}` : 'Executive Meeting Minutes',
     meetingDate: date,
-    timeStarted: userMetadata?.timeStarted || '09:00 AM',
-    timeEnded: userMetadata?.timeEnded || '11:30 AM',
+    timeStarted,
+    timeEnded,
     timeWindow,
     venue,
     attendeesCount,
     attendeesPresent,
     meetingMetadata: metadata,
-    speakersIdentified: inferredSpeakers.length > 0 ? inferredSpeakers : ['Speaker 1 - Président', 'Speaker 2 - Pasteur Govin', 'Speaker 3 - Pasteur Kevin'],
+    speakersIdentified: inferredSpeakers,
     languageAnalysis: {
       primaryLanguages: ['Mauritian Creole', 'French', 'English'],
-      codeSwitchingSummary: 'Multilingual discourse featuring authentic Mauritian Creole expressions and French executive vocabulary.',
-      creoleExpressionsIdentified: [
-        {
-          phrase: 'Koze Nou Tande',
-          literalOrMeaning: 'Dialogue and listening session',
-          context: 'Ministerial consultative platform with partner delegates'
-        },
-        {
-          phrase: 'Met lamin ansam',
-          literalOrMeaning: 'Join hands in solidarity / cooperate',
-          context: 'Consensus regarding church delegate mobilization'
-        }
-      ],
+      codeSwitchingSummary: 'No transcript output returned from the model.',
+      creoleExpressionsIdentified: [],
     },
-    verbatimTranscript: `[00:05] Speaker 1 - Président [Kreol]: Bonzour tou dimounn, mersi pou zot prezans zordi pou sa konsiltasion stratezik.\n[00:22] Speaker 2 - Pasteur Govin [Français]: Merci, nous devons examiner le partenariat avec l'Église Elim et la présence des délégués.\n[00:45] Speaker 3 - Pasteur Kevin [Kreol]: Wi, lor kestion prezans bann delegue, nou bizin met enn plan kler pou Koze Nou Tande.`,
+    verbatimTranscript: '',
     executiveMinutes: {
-      meetingOverview: 'Strategic leadership consultation addressing organizational partnerships, delegate attendance coordination, and upcoming pastoral outreach milestones in Mauritius.',
-      keyTopicsDiscussed: [
-        {
-          topic: 'Delegate Attendance & Engagement',
-          summary: 'Review of delegate mobilization challenges and structural measures to improve attendance.',
-          discussionPoints: [
-            'Pastors reported logistical considerations affecting regional delegate representation.',
-            'Agreed to implement direct coordination calls prior to scheduled consultations.'
-          ]
-        },
-        {
-          topic: 'Partnership Coordination',
-          summary: 'Review of joint outreach initiatives and institutional synergy.',
-          discussionPoints: [
-            'Formalized agenda items for collaborative delegate sessions.',
-            'Established designated points of contact for outreach communications.'
-          ]
-        }
-      ],
-      decisions: [
-        'Confirmed follow-up calendar for regional pastoral consultations.',
-        'Adopted improved delegate notification protocol across all districts.'
-      ],
-      actionItems: [
-        {
-          task: 'Distribute finalized consultation minutes and agenda to all delegates',
-          owner: 'Executive Committee',
-          deadline: 'Next Friday',
-          priority: 'High',
-          completed: false,
-        },
-        {
-          task: 'Follow up with regional pastoral representatives regarding attendance',
-          owner: 'Pasteur Kevin',
-          deadline: 'Two Weeks',
-          priority: 'Medium',
-          completed: false,
-        }
-      ],
-      nextSteps: [
-        'Circulate executive synthesis to all leadership board members.'
-      ]
+      meetingOverview: 'No model output was returned for this recording. Please retry generation or check the Gemini API key and console logs.',
+      keyTopicsDiscussed: [],
+      decisions: [],
+      actionItems: [],
+      nextSteps: [],
     },
     fullMarkdownOutput: '',
   };
