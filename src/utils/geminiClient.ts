@@ -361,7 +361,19 @@ function mergeChunkResults(
     }
   }
 
-  const speakers = Array.from(speakerSet);
+  const rawSpeakers = Array.from(speakerSet);
+  const fullSpeakerText = rawSpeakers.join(' ').toLowerCase();
+  const speakers = rawSpeakers.filter((spk) => {
+    const lower = spk.toLowerCase().trim();
+    if (!lower.startsWith('ps ')) return true;
+    const shortName = lower.replace(/^ps\s+/, '').trim();
+    if (!shortName) return false;
+    const hasFullMatch = rawSpeakers.some(
+      (other) => other !== spk && other.toLowerCase().includes(shortName) && !other.toLowerCase().startsWith('ps ')
+    );
+    return !hasFullMatch && !fullSpeakerText.includes(`pasteur ${shortName}`);
+  });
+
   const attendeesCount = opts.meetingMetadata?.attendeesCount?.trim()
     || (speakers.length > 0 ? `${speakers.length} Speakers` : base.attendeesCount);
   const attendeesPresent = opts.meetingMetadata?.attendeesPresent?.trim()
@@ -383,8 +395,11 @@ function mergeChunkResults(
     }
   }
 
-  const finalOverview = unifiedSentences.length > 0
-    ? unifiedSentences.join(' ')
+  const cleanedSentences = unifiedSentences.map((s) =>
+    s.replace(/\bPart\s+\d+\s*:\s*/gi, '').trim()
+  );
+  const finalOverview = cleanedSentences.length > 0
+    ? cleanedSentences.join(' ')
     : (diagnostics.join(' | ') || base.executiveMinutes.meetingOverview);
 
   const mergedTranscript = transcripts.join('\n\n');
