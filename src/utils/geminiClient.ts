@@ -492,7 +492,8 @@ async function runSingleAudioPart(
   );
 
   const candidateModels = [
-    'gemini-2.5-flash',
+    'gemini-3.8-flash',
+    'gemini-3.5-flash-lite',
   ];
 
   let response: any = null;
@@ -641,7 +642,7 @@ export async function generateMinutesDirectly(
 
     const chunks = await splitAudioIntoChunks(audioBlob, filename, 600, onStatus);
     const collected: Array<{ data: MeetingAnalysisResult; offsetSeconds: number; index: number; total: number }> = [];
-    let lastModelUsed = 'gemini-2.5-flash';
+    let lastModelUsed = 'gemini-3.8-flash';
     let lastFileUri = '';
     let anySuccess = false;
 
