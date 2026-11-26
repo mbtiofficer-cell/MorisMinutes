@@ -204,13 +204,27 @@ function normalizeForDedupe(text: string): string {
     .trim();
 }
 
-function isNearDuplicate(candidate: string, seenNormalized: Set<string>): boolean {
+function isNearDuplicate(candidate: string, seenNormalized: Set<string>, threshold: number = 0.65): boolean {
   const norm = normalizeForDedupe(candidate);
   if (!norm || norm.length < 12) return false;
   if (seenNormalized.has(norm)) return true;
 
+  const candWords = new Set(norm.split(' ').filter((w) => w.length > 2));
+  if (candWords.size === 0) return false;
+
   for (const existing of seenNormalized) {
     if (existing.length > 25 && (existing.includes(norm) || norm.includes(existing))) {
+      return true;
+    }
+    const existingWords = new Set(existing.split(' ').filter((w) => w.length > 2));
+    if (existingWords.size === 0) continue;
+
+    let intersection = 0;
+    for (const w of candWords) {
+      if (existingWords.has(w)) intersection++;
+    }
+    const union = candWords.size + existingWords.size - intersection;
+    if (union > 0 && intersection / union >= threshold) {
       return true;
     }
   }
@@ -228,7 +242,6 @@ function deduplicateTranscriptLines(transcript: string, seenLines: Set<string>):
     const trimmed = line.trim();
     if (!trimmed) continue;
 
-    // Strip leading timestamp and speaker prefix when comparing spoken content
     const dialogueOnly = trimmed
       .replace(/^\[[^\]]+\]\s*/, '')
       .replace(/^[^:\n]{1,60}:\s*/, '')
@@ -329,7 +342,7 @@ function mergeChunkResults(
     for (const act of part.data.executiveMinutes?.actionItems || []) {
       const actionKey = normalizeForDedupe(`${act.task || ''} ${act.owner || ''}`);
       if (actionKey && !isNearDuplicate(actionKey, seenActions)) {
-        seenActions.add(actionKey);
+        seenActions.add(normalizeForDedupe(actionKey));
         actionItems.push(act);
       }
     }
