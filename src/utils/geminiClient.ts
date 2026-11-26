@@ -1,7 +1,7 @@
 import { GoogleGenAI } from '@google/genai';
 import { MeetingAnalysisResult, MinutesLanguage, TranscriptFormat, MinutesTone, MeetingMetadata, ActionItem, KeyTopic } from '../types';
 import { buildMeetingPrompt } from './promptBuilder';
-import { parseMeetingJsonResponse } from './jsonParser';
+import { parseMeetingJsonResponse, cleanTranscriptRepetitions } from './jsonParser';
 import { getAllVoiceProfiles } from './voiceVault';
 
 export interface DirectGenerationOptions {
@@ -195,57 +195,155 @@ function offsetTranscriptTimestamps(transcript: string, offsetSeconds: number): 
   });
 }
 
+function normalizeForDedupe(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/\[[^\]]+\]/g, ' ')
+    .replace(/[^a-z0-9\u00c0-\u024f\s]/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function isNearDuplicate(candidate: string, seenNormalized: Set<string>): boolean {
+  const norm = normalizeForDedupe(candidate);
+  if (!norm || norm.length < 12) return false;
+  if (seenNormalized.has(norm)) return true;
+
+  for (const existing of seenNormalized) {
+    if (existing.length > 25 && (existing.includes(norm) || norm.includes(existing))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function deduplicateTranscriptLines(transcript: string, seenLines: Set<string>): string {
+  const cleaned = cleanTranscriptRepetitions(transcript || '');
+  if (!cleaned.trim()) return '';
+
+  const lines = cleaned.split('\n');
+  const uniqueLines: string[] = [];
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+
+    // Strip leading timestamp and speaker prefix when comparing spoken content
+    const dialogueOnly = trimmed
+      .replace(/^\[[^\]]+\]\s*/, '')
+      .replace(/^[^:\n]{1,60}:\s*/, '')
+      .trim();
+
+    const compareTarget = dialogueOnly.length >= 12 ? dialogueOnly : trimmed;
+    if (!isNearDuplicate(compareTarget, seenLines)) {
+      const norm = normalizeForDedupe(compareTarget);
+      if (norm) seenLines.add(norm);
+      uniqueLines.push(trimmed);
+    }
+  }
+
+  return uniqueLines.join('\n');
+}
+
 function mergeChunkResults(
   partResults: Array<{ data: MeetingAnalysisResult; offsetSeconds: number; index: number; total: number }>,
   filename: string,
   opts: DirectGenerationOptions
 ): MeetingAnalysisResult {
-  const validParts = partResults.filter((p) => p.data.verbatimTranscript.trim() || p.data.executiveMinutes.keyTopicsDiscussed.length > 0);
+  const validParts = partResults.filter(
+    (p) => p.data.verbatimTranscript.trim() || p.data.executiveMinutes.keyTopicsDiscussed.length > 0
+  );
   const base = validParts[0]?.data || partResults[0].data;
 
-  const transcripts = partResults
-    .map((p) => {
-      const shifted = offsetTranscriptTimestamps(p.data.verbatimTranscript || '', p.offsetSeconds);
-      return shifted.trim() ? `[Part ${p.index + 1} of ${p.total}]\n${shifted.trim()}` : '';
-    })
-    .filter(Boolean);
+  const seenTranscriptLines = new Set<string>();
+  const transcripts: string[] = [];
 
   const speakerSet = new Set<string>();
+  const seenOverviews = new Set<string>();
   const overviews: string[] = [];
+
+  const seenTopics = new Set<string>();
   const keyTopics: KeyTopic[] = [];
+
+  const seenDecisions = new Set<string>();
   const decisions: string[] = [];
+
+  const seenActions = new Set<string>();
   const actionItems: ActionItem[] = [];
+
+  const seenNextSteps = new Set<string>();
   const nextSteps: string[] = [];
+
   const expressionsMap = new Map<string, any>();
   const diagnostics: string[] = [];
 
   for (const part of partResults) {
-    for (const spk of part.data.speakersIdentified || []) {
-      if (spk && spk.trim()) speakerSet.add(spk.trim());
+    const shifted = offsetTranscriptTimestamps(part.data.verbatimTranscript || '', part.offsetSeconds);
+    const dedupedPartTranscript = deduplicateTranscriptLines(shifted, seenTranscriptLines);
+    if (dedupedPartTranscript.trim()) {
+      transcripts.push(`[Part ${part.index + 1} of ${part.total}]\n${dedupedPartTranscript.trim()}`);
     }
+
+    for (const spk of part.data.speakersIdentified || []) {
+      const cleanSpk = spk?.trim();
+      if (cleanSpk && !cleanSpk.toLowerCase().startsWith('ps ')) {
+        speakerSet.add(cleanSpk);
+      }
+    }
+
     const ov = part.data.executiveMinutes?.meetingOverview?.trim();
     if (ov) {
       if (ov.startsWith('Gemini returned no output. Diagnostics:')) {
         diagnostics.push(`Part ${part.index + 1}: ${ov}`);
-      } else {
+      } else if (!isNearDuplicate(ov, seenOverviews)) {
+        seenOverviews.add(normalizeForDedupe(ov));
         overviews.push(`Part ${part.index + 1}: ${ov}`);
       }
     }
+
     for (const kt of part.data.executiveMinutes?.keyTopicsDiscussed || []) {
-      keyTopics.push(kt);
+      const topicKey = normalizeForDedupe(`${kt.topic || ''} ${kt.summary || ''}`);
+      if (!topicKey || isNearDuplicate(topicKey, seenTopics)) continue;
+      seenTopics.add(topicKey);
+
+      const seenPoints = new Set<string>();
+      const uniquePoints = (kt.discussionPoints || []).filter((pt) => {
+        if (!pt || isNearDuplicate(pt, seenPoints)) return false;
+        seenPoints.add(normalizeForDedupe(pt));
+        return true;
+      });
+
+      keyTopics.push({
+        ...kt,
+        discussionPoints: uniquePoints,
+      });
     }
+
     for (const dec of part.data.executiveMinutes?.decisions || []) {
-      if (dec && !decisions.includes(dec)) decisions.push(dec);
+      if (dec && !isNearDuplicate(dec, seenDecisions)) {
+        seenDecisions.add(normalizeForDedupe(dec));
+        decisions.push(dec);
+      }
     }
+
     for (const act of part.data.executiveMinutes?.actionItems || []) {
-      actionItems.push(act);
+      const actionKey = normalizeForDedupe(`${act.task || ''} ${act.owner || ''}`);
+      if (actionKey && !isNearDuplicate(actionKey, seenActions)) {
+        seenActions.add(actionKey);
+        actionItems.push(act);
+      }
     }
+
     for (const step of part.data.executiveMinutes?.nextSteps || []) {
-      if (step && !nextSteps.includes(step)) nextSteps.push(step);
+      if (step && !isNearDuplicate(step, seenNextSteps)) {
+        seenNextSteps.add(normalizeForDedupe(step));
+        nextSteps.push(step);
+      }
     }
+
     for (const expr of part.data.languageAnalysis?.creoleExpressionsIdentified || []) {
-      if (expr?.phrase && !expressionsMap.has(expr.phrase)) {
-        expressionsMap.set(expr.phrase, expr);
+      if (expr?.phrase && !expressionsMap.has(expr.phrase.toLowerCase())) {
+        expressionsMap.set(expr.phrase.toLowerCase(), expr);
       }
     }
   }
@@ -259,6 +357,8 @@ function mergeChunkResults(
   const finalOverview = overviews.length > 0
     ? overviews.join('\n\n')
     : (diagnostics.join(' | ') || base.executiveMinutes.meetingOverview);
+
+  const mergedTranscript = transcripts.join('\n\n');
 
   return {
     ...base,
@@ -275,7 +375,7 @@ function mergeChunkResults(
       ...base.languageAnalysis,
       creoleExpressionsIdentified: Array.from(expressionsMap.values()),
     },
-    verbatimTranscript: transcripts.join('\n\n'),
+    verbatimTranscript: mergedTranscript,
     executiveMinutes: {
       meetingOverview: finalOverview,
       keyTopicsDiscussed: keyTopics,
@@ -283,7 +383,7 @@ function mergeChunkResults(
       actionItems,
       nextSteps,
     },
-    fullMarkdownOutput: transcripts.join('\n\n'),
+    fullMarkdownOutput: mergedTranscript,
   };
 }
 
@@ -291,6 +391,8 @@ async function runSingleAudioPart(
   ai: GoogleGenAI,
   partBlob: Blob,
   partName: string,
+  partIndex: number,
+  totalParts: number,
   referenceVoiceParts: any[],
   referenceVoiceNames: string[],
   minutesLanguage: MinutesLanguage,
@@ -322,11 +424,16 @@ async function runSingleAudioPart(
     },
   };
 
+  const partFocusNote = totalParts > 1
+    ? `This is segment ${partIndex + 1} of ${totalParts} of a longer meeting. Focus strictly on new points, speakers, decisions, and actions spoken in this segment without repeating generic summaries.`
+    : '';
+
   const speakerInstruction = referenceVoiceNames.length > 0
-    ? additionalContext
+    ? [additionalContext || '', partFocusNote].filter(Boolean).join(' ')
     : [
         additionalContext || '',
         'Label distinct speakers dynamically as Speaker 1, Speaker 2, etc. (or use their actual spoken name/role only if explicitly stated in the recording). Do not guess or invent speaker names.',
+        partFocusNote,
       ]
         .filter(Boolean)
         .join(' ');
@@ -499,6 +606,8 @@ export async function generateMinutesDirectly(
         ai,
         chunk.blob,
         label,
+        i,
+        chunks.length,
         referenceVoiceParts,
         referenceVoiceNames,
         minutesLanguage,
