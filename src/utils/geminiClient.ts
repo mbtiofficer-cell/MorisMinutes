@@ -367,8 +367,24 @@ function mergeChunkResults(
   const attendeesPresent = opts.meetingMetadata?.attendeesPresent?.trim()
     || (speakers.length > 0 ? speakers.join(', ') : base.attendeesPresent);
 
-  const finalOverview = overviews.length > 0
-    ? overviews.join('\n\n')
+  const unifiedSentences: string[] = [];
+  const seenOverviewSentences = new Set<string>();
+  for (const rawOv of overviews) {
+    const cleanOv = rawOv.replace(/^Part \d+:\s*/i, '');
+    const sentences = cleanOv
+      .split(/(?<=[.!?])\s+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    for (const sent of sentences) {
+      if (!isNearDuplicate(sent, seenOverviewSentences, 0.5)) {
+        seenOverviewSentences.add(normalizeForDedupe(sent));
+        unifiedSentences.push(sent);
+      }
+    }
+  }
+
+  const finalOverview = unifiedSentences.length > 0
+    ? unifiedSentences.join(' ')
     : (diagnostics.join(' | ') || base.executiveMinutes.meetingOverview);
 
   const mergedTranscript = transcripts.join('\n\n');
