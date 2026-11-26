@@ -201,7 +201,6 @@ export async function generateMinutesDirectly(
               responseMimeType: 'application/json',
               temperature: 0.15,
               maxOutputTokens: 32768,
-              thinkingConfig: { thinkingBudget: 0 },
             },
           });
 
