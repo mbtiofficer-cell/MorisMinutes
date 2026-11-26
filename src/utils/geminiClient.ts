@@ -501,9 +501,9 @@ async function runSingleAudioPart(
   const failureReasons: string[] = [];
 
   for (const modelCandidate of candidateModels) {
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        onStatus?.(`Transcribing ${partName} with ${modelCandidate}${attempt > 1 ? ' (retry)' : ''}...`);
+        onStatus?.(`Transcribing ${partName} with ${modelCandidate}${attempt > 1 ? ` (retry ${attempt - 1})` : ''}...`);
         const res = await ai.models.generateContent({
           model: modelCandidate,
           contents: {
@@ -533,13 +533,16 @@ async function runSingleAudioPart(
         } else {
           const finishReason = res?.candidates?.[0]?.finishReason || 'EMPTY_TEXT';
           failureReasons.push(`${modelCandidate} (attempt ${attempt}): empty response (${finishReason})`);
+          if (attempt < 3) {
+            await new Promise((r) => setTimeout(r, 3000 * attempt));
+          }
         }
       } catch (err: any) {
         const msg = err?.message || String(err);
         console.warn(`Direct client call to ${modelCandidate} (attempt ${attempt}) failed:`, msg);
         failureReasons.push(`${modelCandidate} (attempt ${attempt}): ${msg}`);
-        if (attempt < 2) {
-          await new Promise((r) => setTimeout(r, 2000));
+        if (attempt < 3) {
+          await new Promise((r) => setTimeout(r, 3000 * attempt));
         }
       }
     }
