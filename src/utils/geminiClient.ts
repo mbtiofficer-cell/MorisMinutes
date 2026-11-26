@@ -1,5 +1,5 @@
 import { GoogleGenAI } from '@google/genai';
-import { MeetingAnalysisResult, MinutesLanguage, TranscriptFormat, MinutesTone, MeetingMetadata } from '../types';
+import { MeetingAnalysisResult, MinutesLanguage, TranscriptFormat, MinutesTone, MeetingMetadata, ActionItem, KeyTopic } from '../types';
 import { buildMeetingPrompt } from './promptBuilder';
 import { parseMeetingJsonResponse } from './jsonParser';
 import { getAllVoiceProfiles } from './voiceVault';
@@ -75,6 +75,352 @@ async function waitForFileActive(ai: GoogleGenAI, fileObj: any, onStatus?: (msg:
   return fileObj;
 }
 
+function audioBufferToWavBlob(buffer: AudioBuffer): Blob {
+  const numChannels = 1;
+  const sampleRate = buffer.sampleRate;
+  const length = buffer.length;
+  const channelData = buffer.getChannelData(0);
+  const bytesPerSample = 2;
+  const dataSize = length * numChannels * bytesPerSample;
+  const arrayBuffer = new ArrayBuffer(44 + dataSize);
+  const view = new DataView(arrayBuffer);
+
+  const writeString = (offset: number, str: string) => {
+    for (let i = 0; i < str.length; i++) {
+      view.setUint8(offset + i, str.charCodeAt(i));
+    }
+  };
+
+  writeString(0, 'RIFF');
+  view.setUint32(4, 36 + dataSize, true);
+  writeString(8, 'WAVE');
+  writeString(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, numChannels, true);
+  view.setUint32(24, sampleRate, true);
+  view.setUint32(28, sampleRate * numChannels * bytesPerSample, true);
+  view.setUint16(32, numChannels * bytesPerSample, true);
+  view.setUint16(34, 16, true);
+  writeString(36, 'data');
+  view.setUint32(40, dataSize, true);
+
+  let offset = 44;
+  for (let i = 0; i < length; i++) {
+    const sample = Math.max(-1, Math.min(1, channelData[i]));
+    view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    offset += 2;
+  }
+
+  return new Blob([arrayBuffer], { type: 'audio/wav' });
+}
+
+async function splitAudioIntoChunks(
+  audioBlob: Blob,
+  filename: string,
+  chunkSeconds: number = 600,
+  onStatus?: (status: string) => void
+): Promise<Array<{ blob: Blob; name: string; offsetSeconds: number }>> {
+  const AudioCtx = typeof window !== 'undefined'
+    ? (window.AudioContext || (window as any).webkitAudioContext)
+    : null;
+
+  if (!AudioCtx || audioBlob.size < 2 * 1024 * 1024) {
+    return [{ blob: audioBlob, name: filename || `recording_${Date.now()}.mp3`, offsetSeconds: 0 }];
+  }
+
+  let audioContext: AudioContext | null = null;
+  try {
+    onStatus?.('Checking recording length for automatic chunking...');
+    const arrayBuffer = await audioBlob.arrayBuffer();
+    audioContext = new AudioCtx();
+    const decoded = await audioContext.decodeAudioData(arrayBuffer.slice(0));
+
+    if (decoded.duration <= chunkSeconds + 30) {
+      return [{ blob: audioBlob, name: filename || `recording_${Date.now()}.mp3`, offsetSeconds: 0 }];
+    }
+
+    const chunks: Array<{ blob: Blob; name: string; offsetSeconds: number }> = [];
+    const totalChunks = Math.ceil(decoded.duration / chunkSeconds);
+    const baseName = (filename || 'recording').replace(/\.[^/.]+$/, '');
+
+    for (let i = 0; i < totalChunks; i++) {
+      const startSec = i * chunkSeconds;
+      const endSec = Math.min(decoded.duration, (i + 1) * chunkSeconds);
+      const frameStart = Math.floor(startSec * decoded.sampleRate);
+      const frameCount = Math.max(1, Math.floor((endSec - startSec) * decoded.sampleRate));
+
+      const segmentBuffer = audioContext.createBuffer(1, frameCount, decoded.sampleRate);
+      const srcChannel = decoded.getChannelData(0);
+      const dstChannel = segmentBuffer.getChannelData(0);
+      for (let j = 0; j < frameCount; j++) {
+        dstChannel[j] = srcChannel[frameStart + j] || 0;
+      }
+
+      chunks.push({
+        blob: audioBufferToWavBlob(segmentBuffer),
+        name: `${baseName}_part_${i + 1}_of_${totalChunks}.wav`,
+        offsetSeconds: startSec,
+      });
+    }
+
+    return chunks;
+  } catch (err) {
+    console.warn('Could not decode audio in browser for chunking; sending whole file:', err);
+    return [{ blob: audioBlob, name: filename || `recording_${Date.now()}.mp3`, offsetSeconds: 0 }];
+  } finally {
+    if (audioContext) {
+      try {
+        await audioContext.close();
+      } catch {
+        // ignore
+      }
+    }
+  }
+}
+
+function offsetTranscriptTimestamps(transcript: string, offsetSeconds: number): string {
+  if (!transcript || offsetSeconds <= 0) return transcript;
+  return transcript.replace(/\[(\d{1,2}):(\d{2})(?::(\d{2}))?\]/g, (_match, a, b, c) => {
+    const totalSec = c !== undefined
+      ? Number(a) * 3600 + Number(b) * 60 + Number(c) + Math.floor(offsetSeconds)
+      : Number(a) * 60 + Number(b) + Math.floor(offsetSeconds);
+    const hrs = Math.floor(totalSec / 3600);
+    const mins = Math.floor((totalSec % 3600) / 60);
+    const secs = totalSec % 60;
+    if (hrs > 0) {
+      return `[${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}]`;
+    }
+    return `[${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}]`;
+  });
+}
+
+function mergeChunkResults(
+  partResults: Array<{ data: MeetingAnalysisResult; offsetSeconds: number; index: number; total: number }>,
+  filename: string,
+  opts: DirectGenerationOptions
+): MeetingAnalysisResult {
+  const validParts = partResults.filter((p) => p.data.verbatimTranscript.trim() || p.data.executiveMinutes.keyTopicsDiscussed.length > 0);
+  const base = validParts[0]?.data || partResults[0].data;
+
+  const transcripts = partResults
+    .map((p) => {
+      const shifted = offsetTranscriptTimestamps(p.data.verbatimTranscript || '', p.offsetSeconds);
+      return shifted.trim() ? `[Part ${p.index + 1} of ${p.total}]\n${shifted.trim()}` : '';
+    })
+    .filter(Boolean);
+
+  const speakerSet = new Set<string>();
+  const overviews: string[] = [];
+  const keyTopics: KeyTopic[] = [];
+  const decisions: string[] = [];
+  const actionItems: ActionItem[] = [];
+  const nextSteps: string[] = [];
+  const expressionsMap = new Map<string, any>();
+  const diagnostics: string[] = [];
+
+  for (const part of partResults) {
+    for (const spk of part.data.speakersIdentified || []) {
+      if (spk && spk.trim()) speakerSet.add(spk.trim());
+    }
+    const ov = part.data.executiveMinutes?.meetingOverview?.trim();
+    if (ov) {
+      if (ov.startsWith('Gemini returned no output. Diagnostics:')) {
+        diagnostics.push(`Part ${part.index + 1}: ${ov}`);
+      } else {
+        overviews.push(`Part ${part.index + 1}: ${ov}`);
+      }
+    }
+    for (const kt of part.data.executiveMinutes?.keyTopicsDiscussed || []) {
+      keyTopics.push(kt);
+    }
+    for (const dec of part.data.executiveMinutes?.decisions || []) {
+      if (dec && !decisions.includes(dec)) decisions.push(dec);
+    }
+    for (const act of part.data.executiveMinutes?.actionItems || []) {
+      actionItems.push(act);
+    }
+    for (const step of part.data.executiveMinutes?.nextSteps || []) {
+      if (step && !nextSteps.includes(step)) nextSteps.push(step);
+    }
+    for (const expr of part.data.languageAnalysis?.creoleExpressionsIdentified || []) {
+      if (expr?.phrase && !expressionsMap.has(expr.phrase)) {
+        expressionsMap.set(expr.phrase, expr);
+      }
+    }
+  }
+
+  const speakers = Array.from(speakerSet);
+  const attendeesCount = opts.meetingMetadata?.attendeesCount?.trim()
+    || (speakers.length > 0 ? `${speakers.length} Speakers` : base.attendeesCount);
+  const attendeesPresent = opts.meetingMetadata?.attendeesPresent?.trim()
+    || (speakers.length > 0 ? speakers.join(', ') : base.attendeesPresent);
+
+  const finalOverview = overviews.length > 0
+    ? overviews.join('\n\n')
+    : (diagnostics.join(' | ') || base.executiveMinutes.meetingOverview);
+
+  return {
+    ...base,
+    meetingTitle: filename ? `Executive Minutes: ${filename.replace(/\.[^/.]+$/, '')}` : base.meetingTitle,
+    attendeesCount,
+    attendeesPresent,
+    meetingMetadata: {
+      ...base.meetingMetadata,
+      attendeesCount,
+      attendeesPresent,
+    },
+    speakersIdentified: speakers,
+    languageAnalysis: {
+      ...base.languageAnalysis,
+      creoleExpressionsIdentified: Array.from(expressionsMap.values()),
+    },
+    verbatimTranscript: transcripts.join('\n\n'),
+    executiveMinutes: {
+      meetingOverview: finalOverview,
+      keyTopicsDiscussed: keyTopics,
+      decisions,
+      actionItems,
+      nextSteps,
+    },
+    fullMarkdownOutput: transcripts.join('\n\n'),
+  };
+}
+
+async function runSingleAudioPart(
+  ai: GoogleGenAI,
+  partBlob: Blob,
+  partName: string,
+  referenceVoiceParts: any[],
+  referenceVoiceNames: string[],
+  minutesLanguage: MinutesLanguage,
+  transcriptFormat: TranscriptFormat,
+  minutesTone: MinutesTone,
+  additionalContext: string | undefined,
+  meetingMetadata: MeetingMetadata | undefined,
+  filesToCleanup: string[],
+  onStatus?: (status: string) => void
+): Promise<{ modelUsed: string; fileUriUsed: string; data: MeetingAnalysisResult; hasText: boolean }> {
+  onStatus?.(`Uploading ${partName} to Gemini...`);
+  const mimeType = partBlob.type || 'audio/mp3';
+
+  const uploadedFile = await ai.files.upload({
+    file: partBlob,
+    config: {
+      mimeType,
+      displayName: partName,
+    },
+  });
+  filesToCleanup.push(uploadedFile.name);
+
+  await waitForFileActive(ai, uploadedFile, onStatus);
+
+  const mainAudioPart = {
+    fileData: {
+      fileUri: uploadedFile.uri,
+      mimeType: uploadedFile.mimeType || mimeType,
+    },
+  };
+
+  const speakerInstruction = referenceVoiceNames.length > 0
+    ? additionalContext
+    : [
+        additionalContext || '',
+        'Label distinct speakers dynamically as Speaker 1, Speaker 2, etc. (or use their actual spoken name/role only if explicitly stated in the recording). Do not guess or invent speaker names.',
+      ]
+        .filter(Boolean)
+        .join(' ');
+
+  const userPrompt = buildMeetingPrompt(
+    minutesLanguage,
+    transcriptFormat,
+    minutesTone,
+    speakerInstruction,
+    meetingMetadata,
+    referenceVoiceNames
+  );
+
+  const candidateModels = [
+    'gemini-2.5-flash',
+    'gemini-3.5-flash-lite',
+  ];
+
+  let response: any = null;
+  let modelUsed = candidateModels[0];
+  const failureReasons: string[] = [];
+
+  for (const modelCandidate of candidateModels) {
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      try {
+        onStatus?.(`Transcribing ${partName} with ${modelCandidate}${attempt > 1 ? ' (retry)' : ''}...`);
+        const res = await ai.models.generateContent({
+          model: modelCandidate,
+          contents: {
+            parts: [...referenceVoiceParts, mainAudioPart, { text: userPrompt }],
+          },
+          config: {
+            responseMimeType: 'application/json',
+            temperature: 0.15,
+            maxOutputTokens: 32768,
+          },
+        });
+
+        let candidateText = '';
+        if (typeof res?.text === 'string' && res.text.trim()) {
+          candidateText = res.text.trim();
+        } else if (res?.candidates?.[0]?.content?.parts) {
+          candidateText = res.candidates[0].content.parts
+            .map((p: any) => p.text || '')
+            .join('')
+            .trim();
+        }
+
+        if (candidateText) {
+          response = res;
+          modelUsed = modelCandidate;
+          break;
+        } else {
+          const finishReason = res?.candidates?.[0]?.finishReason || 'EMPTY_TEXT';
+          failureReasons.push(`${modelCandidate} (attempt ${attempt}): empty response (${finishReason})`);
+        }
+      } catch (err: any) {
+        const msg = err?.message || String(err);
+        console.warn(`Direct client call to ${modelCandidate} (attempt ${attempt}) failed:`, msg);
+        failureReasons.push(`${modelCandidate} (attempt ${attempt}): ${msg}`);
+        if (attempt < 2) {
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+      }
+    }
+    if (response) break;
+  }
+
+  let rawText = '';
+  if (response) {
+    if (typeof response.text === 'string' && response.text.trim()) {
+      rawText = response.text.trim();
+    } else if (response.candidates?.[0]?.content?.parts) {
+      rawText = response.candidates[0].content.parts
+        .map((p: any) => p.text || '')
+        .join('')
+        .trim();
+    }
+  }
+
+  const parsedData = parseMeetingJsonResponse(rawText, partName, minutesLanguage, meetingMetadata);
+
+  if (!rawText && failureReasons.length > 0) {
+    parsedData.executiveMinutes.meetingOverview = `Gemini returned no output. Diagnostics: ${failureReasons.slice(-2).join(' | ')}`;
+  }
+
+  return {
+    modelUsed,
+    fileUriUsed: uploadedFile.uri,
+    data: parsedData,
+    hasText: Boolean(rawText),
+  };
+}
+
 export async function generateMinutesDirectly(
   audioBlob: Blob,
   filename: string,
@@ -98,7 +444,6 @@ export async function generateMinutesDirectly(
   const filesToCleanup: string[] = [];
 
   try {
-    // 1. Load & upload saved Voice Vault profiles in parallel
     const savedVoices = (await getAllVoiceProfiles()).slice(0, 8);
     const referenceVoiceParts: any[] = [];
     const referenceVoiceNames: string[] = [];
@@ -141,123 +486,52 @@ export async function generateMinutesDirectly(
       }
     }
 
-    // 2. Upload main meeting audio blob
-    onStatus?.('Uploading meeting audio to Gemini...');
-    const uploadDisplayName = filename || `recording_${Date.now()}.mp3`;
-    const mimeType = audioBlob.type || 'audio/mp3';
+    const chunks = await splitAudioIntoChunks(audioBlob, filename, 600, onStatus);
+    const collected: Array<{ data: MeetingAnalysisResult; offsetSeconds: number; index: number; total: number }> = [];
+    let lastModelUsed = 'gemini-2.5-flash';
+    let lastFileUri = '';
+    let anySuccess = false;
 
-    const uploadedFile = await ai.files.upload({
-      file: audioBlob,
-      config: {
-        mimeType,
-        displayName: uploadDisplayName,
-      },
-    });
-    filesToCleanup.push(uploadedFile.name);
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i];
+      const label = chunks.length > 1 ? `${chunk.name} (${i + 1}/${chunks.length})` : chunk.name;
+      const partOut = await runSingleAudioPart(
+        ai,
+        chunk.blob,
+        label,
+        referenceVoiceParts,
+        referenceVoiceNames,
+        minutesLanguage,
+        transcriptFormat,
+        minutesTone,
+        additionalContext,
+        opts.meetingMetadata,
+        filesToCleanup,
+        onStatus
+      );
 
-    await waitForFileActive(ai, uploadedFile, onStatus);
+      lastModelUsed = partOut.modelUsed;
+      lastFileUri = partOut.fileUriUsed;
+      if (partOut.hasText) anySuccess = true;
 
-    onStatus?.(
-      referenceVoiceNames.length > 0
-        ? `Matching ${referenceVoiceNames.length} saved voice(s) & generating minutes...`
-        : `Generating executive minutes in ${minutesLanguage}...`
-    );
-
-    const mainAudioPart = {
-      fileData: {
-        fileUri: uploadedFile.uri,
-        mimeType: uploadedFile.mimeType || mimeType,
-      },
-    };
-
-    const userPrompt = buildMeetingPrompt(
-      minutesLanguage,
-      transcriptFormat,
-      minutesTone,
-      additionalContext,
-      opts.meetingMetadata,
-      referenceVoiceNames
-    );
-
-    const candidateModels = [
-      'gemini-2.5-flash',
-      'gemini-3.5-flash-lite',
-    ];
-
-    let response: any = null;
-    let modelUsed = candidateModels[0];
-    const failureReasons: string[] = [];
-
-    for (const modelCandidate of candidateModels) {
-      for (let attempt = 1; attempt <= 2; attempt++) {
-        try {
-          onStatus?.(`Transcribing & drafting minutes with ${modelCandidate}${attempt > 1 ? ' (retry)' : ''}...`);
-          const res = await ai.models.generateContent({
-            model: modelCandidate,
-            contents: {
-              parts: [...referenceVoiceParts, mainAudioPart, { text: userPrompt }],
-            },
-            config: {
-              responseMimeType: 'application/json',
-              temperature: 0.15,
-              maxOutputTokens: 32768,
-            },
-          });
-
-          let candidateText = '';
-          if (typeof res?.text === 'string' && res.text.trim()) {
-            candidateText = res.text.trim();
-          } else if (res?.candidates?.[0]?.content?.parts) {
-            candidateText = res.candidates[0].content.parts
-              .map((p: any) => p.text || '')
-              .join('')
-              .trim();
-          }
-
-          if (candidateText) {
-            response = res;
-            modelUsed = modelCandidate;
-            break;
-          } else {
-            const finishReason = res?.candidates?.[0]?.finishReason || 'EMPTY_TEXT';
-            failureReasons.push(`${modelCandidate} (attempt ${attempt}): empty response (${finishReason})`);
-          }
-        } catch (err: any) {
-          const msg = err?.message || String(err);
-          console.warn(`Direct client call to ${modelCandidate} (attempt ${attempt}) failed:`, msg);
-          failureReasons.push(`${modelCandidate} (attempt ${attempt}): ${msg}`);
-          if (attempt < 2) {
-            await new Promise((r) => setTimeout(r, 1500));
-          }
-        }
-      }
-      if (response) break;
-    }
-
-    let rawText = '';
-    if (response) {
-      if (typeof response.text === 'string' && response.text.trim()) {
-        rawText = response.text.trim();
-      } else if (response.candidates?.[0]?.content?.parts) {
-        rawText = response.candidates[0].content.parts
-          .map((p: any) => p.text || '')
-          .join('')
-          .trim();
-      }
+      collected.push({
+        data: partOut.data,
+        offsetSeconds: chunk.offsetSeconds,
+        index: i,
+        total: chunks.length,
+      });
     }
 
     onStatus?.('Formatting executive minutes...');
-    const parsedData = parseMeetingJsonResponse(rawText, filename, minutesLanguage, opts.meetingMetadata);
-
-    if (!rawText && failureReasons.length > 0) {
-      parsedData.executiveMinutes.meetingOverview = `Gemini returned no output. Diagnostics: ${failureReasons.slice(-2).join(' | ')}`;
-    }
+    const finalData = chunks.length === 1
+      ? collected[0].data
+      : mergeChunkResults(collected, filename, opts);
 
     return {
-      success: Boolean(rawText),
-      modelUsed,
-      fileUriUsed: uploadedFile.uri,
-      data: parsedData,
+      success: anySuccess,
+      modelUsed: lastModelUsed,
+      fileUriUsed: lastFileUri,
+      data: finalData,
     };
   } finally {
     for (const remoteName of filesToCleanup) {
