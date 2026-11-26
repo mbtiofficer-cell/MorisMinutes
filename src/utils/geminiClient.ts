@@ -493,7 +493,6 @@ async function runSingleAudioPart(
 
   const candidateModels = [
     'gemini-2.5-flash',
-    'gemini-3.5-flash-lite',
   ];
 
   let response: any = null;
@@ -534,7 +533,7 @@ async function runSingleAudioPart(
           const finishReason = res?.candidates?.[0]?.finishReason || 'EMPTY_TEXT';
           failureReasons.push(`${modelCandidate} (attempt ${attempt}): empty response (${finishReason})`);
           if (attempt < 3) {
-            await new Promise((r) => setTimeout(r, 3000 * attempt));
+            await new Promise((r) => setTimeout(r, 5000 * attempt));
           }
         }
       } catch (err: any) {
@@ -542,7 +541,7 @@ async function runSingleAudioPart(
         console.warn(`Direct client call to ${modelCandidate} (attempt ${attempt}) failed:`, msg);
         failureReasons.push(`${modelCandidate} (attempt ${attempt}): ${msg}`);
         if (attempt < 3) {
-          await new Promise((r) => setTimeout(r, 3000 * attempt));
+          await new Promise((r) => setTimeout(r, 5000 * attempt));
         }
       }
     }
