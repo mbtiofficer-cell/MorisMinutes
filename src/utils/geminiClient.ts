@@ -1,9 +1,7 @@
 import { GoogleGenAI } from "@google/genai";
 import { getAllVoiceProfiles } from "./voiceVault";
 
-const PRIMARY_MODEL = "gemini-3.8-flash";
-const FALLBACK_MODEL = "gemini-3.5-flash-lite";
-const CANDIDATE_MODELS = [PRIMARY_MODEL, FALLBACK_MODEL];
+const CANDIDATE_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"];
 const REQUEST_TIMEOUT_MS = 90000;
 
 const PARAGRAPH_TRANSCRIPTION_PROMPT = `
@@ -66,23 +64,34 @@ function extractResponseText(response: any): string {
   return collected.join("\n\n").trim();
 }
 
+function formatError(err: unknown): string {
+  if (!err) return "Unknown error";
+  if (typeof err === "string") return err;
+  const anyErr = err as any;
+  return (
+    anyErr?.message ||
+    anyErr?.error?.message ||
+    JSON.stringify(anyErr) ||
+    String(err)
+  );
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function isRetryableError(err: unknown): boolean {
-  const msg = String((err as any)?.message || err || "").toLowerCase();
+function isRetryableError(msg: string): boolean {
+  const lower = msg.toLowerCase();
   return (
-    msg.includes("503") ||
-    msg.includes("unavailable") ||
-    msg.includes("high demand") ||
-    msg.includes("429") ||
-    msg.includes("resource_exhausted") ||
-    msg.includes("500") ||
-    msg.includes("504") ||
-    msg.includes("timeout") ||
-    msg.includes("timed out") ||
-    msg.includes("empty response")
+    lower.includes("503") ||
+    lower.includes("unavailable") ||
+    lower.includes("high demand") ||
+    lower.includes("429") ||
+    lower.includes("resource_exhausted") ||
+    lower.includes("500") ||
+    lower.includes("504") ||
+    lower.includes("timeout") ||
+    lower.includes("timed out")
   );
 }
 
@@ -107,7 +116,7 @@ async function callModelWithRetry(
   contents: any[],
   onStatus?: (msg: string) => void
 ): Promise<string> {
-  let lastError: unknown;
+  let lastMsg = "";
   for (let attempt = 1; attempt <= 2; attempt++) {
     try {
       if (typeof onStatus === "function") {
@@ -123,13 +132,15 @@ async function callModelWithRetry(
       );
       const text = extractResponseText(response);
       if (!text) {
-        throw new Error(`${model} (attempt ${attempt}): empty response text`);
+        const finishReason =
+          (response as any)?.candidates?.[0]?.finishReason || "no finishReason";
+        throw new Error(`${model} returned empty text (finishReason: ${finishReason})`);
       }
       return text;
     } catch (err) {
-      lastError = err;
-      if (!isRetryableError(err) || attempt === 2) {
-        throw err;
+      lastMsg = formatError(err);
+      if (!isRetryableError(lastMsg) || attempt === 2) {
+        throw new Error(lastMsg);
       }
       if (typeof onStatus === "function") {
         onStatus(`Retrying ${model} in ${attempt * 3}s...`);
@@ -137,7 +148,7 @@ async function callModelWithRetry(
       await sleep(3000 * attempt);
     }
   }
-  throw lastError;
+  throw new Error(lastMsg || `${model} failed`);
 }
 
 async function blobToBase64(blob: Blob): Promise<string> {
@@ -207,18 +218,15 @@ export async function transcribeAudioToParagraphs(params: {
     }
   }
 
-  let lastError: unknown;
+  const errors: string[] = [];
   for (const model of CANDIDATE_MODELS) {
     try {
       return await callModelWithRetry(ai, model, parts, onStatus);
     } catch (err) {
-      lastError = err;
-      if (typeof onStatus === "function") {
-        onStatus(`Switching from ${model} to next model...`);
-      }
+      errors.push(formatError(err));
     }
   }
-  throw lastError;
+  throw new Error(errors.join(" | ") || "Received empty response from Gemini API.");
 }
 
 export async function generateMinutesDirectly(...args: any[]): Promise<any> {
