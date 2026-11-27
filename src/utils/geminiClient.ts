@@ -48,6 +48,24 @@ function resolveApiKey(explicitKey?: unknown): string {
   return "";
 }
 
+function extractResponseText(response: any): string {
+  if (!response) return "";
+  if (typeof response.text === "string" && response.text.trim()) {
+    return response.text.trim();
+  }
+  const candidates = response.candidates || response.response?.candidates || [];
+  const collected: string[] = [];
+  for (const cand of candidates) {
+    const parts = cand?.content?.parts || [];
+    for (const part of parts) {
+      if (typeof part?.text === "string" && part.text.trim()) {
+        collected.push(part.text.trim());
+      }
+    }
+  }
+  return collected.join("\n\n").trim();
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -63,7 +81,8 @@ function isRetryableError(err: unknown): boolean {
     msg.includes("500") ||
     msg.includes("504") ||
     msg.includes("timeout") ||
-    msg.includes("timed out")
+    msg.includes("timed out") ||
+    msg.includes("empty response")
   );
 }
 
@@ -102,7 +121,7 @@ async function callModelWithRetry(
         REQUEST_TIMEOUT_MS,
         `${model} request`
       );
-      const text = response?.text?.trim() || "";
+      const text = extractResponseText(response);
       if (!text) {
         throw new Error(`${model} (attempt ${attempt}): empty response text`);
       }
@@ -113,7 +132,7 @@ async function callModelWithRetry(
         throw err;
       }
       if (typeof onStatus === "function") {
-        onStatus(`Model busy, retrying ${model} in ${attempt * 3}s...`);
+        onStatus(`Retrying ${model} in ${attempt * 3}s...`);
       }
       await sleep(3000 * attempt);
     }
