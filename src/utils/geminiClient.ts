@@ -4,6 +4,7 @@ import { getAllVoiceProfiles } from "./voiceVault";
 const PRIMARY_MODEL = "gemini-3.8-flash";
 const FALLBACK_MODEL = "gemini-3.5-flash-lite";
 const CANDIDATE_MODELS = [PRIMARY_MODEL, FALLBACK_MODEL];
+const REQUEST_TIMEOUT_MS = 90000;
 
 const PARAGRAPH_TRANSCRIPTION_PROMPT = `
 Transcribe everything spoken in this audio recording into clear, complete paragraphs.
@@ -61,22 +62,46 @@ function isRetryableError(err: unknown): boolean {
     msg.includes("resource_exhausted") ||
     msg.includes("500") ||
     msg.includes("504") ||
-    msg.includes("timeout")
+    msg.includes("timeout") ||
+    msg.includes("timed out")
   );
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s.`));
+    }, ms);
+  });
+
+  try {
+    return await Promise.race([promise, timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 async function callModelWithRetry(
   ai: GoogleGenAI,
   model: string,
-  contents: any[]
+  contents: any[],
+  onStatus?: (msg: string) => void
 ): Promise<string> {
   let lastError: unknown;
-  for (let attempt = 1; attempt <= 3; attempt++) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
     try {
-      const response = await ai.models.generateContent({
-        model,
-        contents,
-      });
+      if (typeof onStatus === "function") {
+        onStatus(`Transcribing with ${model} (attempt ${attempt}/2)...`);
+      }
+      const response = await withTimeout(
+        ai.models.generateContent({
+          model,
+          contents,
+        }),
+        REQUEST_TIMEOUT_MS,
+        `${model} request`
+      );
       const text = response?.text?.trim() || "";
       if (!text) {
         throw new Error(`${model} (attempt ${attempt}): empty response text`);
@@ -84,10 +109,13 @@ async function callModelWithRetry(
       return text;
     } catch (err) {
       lastError = err;
-      if (!isRetryableError(err) || attempt === 3) {
+      if (!isRetryableError(err) || attempt === 2) {
         throw err;
       }
-      await sleep(5000 * attempt);
+      if (typeof onStatus === "function") {
+        onStatus(`Model busy, retrying ${model} in ${attempt * 3}s...`);
+      }
+      await sleep(3000 * attempt);
     }
   }
   throw lastError;
@@ -112,6 +140,7 @@ export async function transcribeAudioToParagraphs(params: {
   chunkIndex?: number;
   totalChunks?: number;
   includeVoiceVault?: boolean;
+  onStatus?: (msg: string) => void;
 }): Promise<string> {
   const {
     apiKey: rawApiKey,
@@ -120,6 +149,7 @@ export async function transcribeAudioToParagraphs(params: {
     chunkIndex,
     totalChunks,
     includeVoiceVault = false,
+    onStatus,
   } = params;
 
   const apiKey = resolveApiKey(rawApiKey);
@@ -161,9 +191,12 @@ export async function transcribeAudioToParagraphs(params: {
   let lastError: unknown;
   for (const model of CANDIDATE_MODELS) {
     try {
-      return await callModelWithRetry(ai, model, parts);
+      return await callModelWithRetry(ai, model, parts, onStatus);
     } catch (err) {
       lastError = err;
+      if (typeof onStatus === "function") {
+        onStatus(`Switching from ${model} to next model...`);
+      }
     }
   }
   throw lastError;
@@ -173,6 +206,12 @@ export async function generateMinutesDirectly(...args: any[]): Promise<any> {
   const targetFile = args[0];
   const targetName = typeof args[1] === "string" ? args[1] : "";
   const options = args[2] && typeof args[2] === "object" ? args[2] : {};
+  const onStatus =
+    typeof options.onStatus === "function" ? options.onStatus : undefined;
+
+  if (onStatus) {
+    onStatus("Checking API key and preparing audio...");
+  }
 
   const apiKey = resolveApiKey(
     options.apiKey ||
@@ -188,6 +227,13 @@ export async function generateMinutesDirectly(...args: any[]): Promise<any> {
     (targetFile && typeof targetFile.arrayBuffer === "function")
   ) {
     mimeType = targetFile.type || mimeType;
+    const sizeMb =
+      typeof targetFile.size === "number"
+        ? (targetFile.size / (1024 * 1024)).toFixed(1)
+        : "?";
+    if (onStatus) {
+      onStatus(`Reading audio file (${sizeMb} MB)...`);
+    }
     audioBase64 = await blobToBase64(targetFile as Blob);
   } else if (targetFile && typeof targetFile === "object") {
     audioBase64 =
@@ -216,10 +262,11 @@ export async function generateMinutesDirectly(...args: any[]): Promise<any> {
     chunkIndex: options.chunkIndex,
     totalChunks: options.totalChunks,
     includeVoiceVault: false,
+    onStatus,
   });
 
-  if (typeof options.onStatus === "function") {
-    options.onStatus("Paragraph transcription complete.");
+  if (onStatus) {
+    onStatus("Paragraph transcription complete.");
   }
 
   return {
