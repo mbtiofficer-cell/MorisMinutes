@@ -14,6 +14,39 @@ Rules:
 - Keep natural phrasing and accurate terminology.
 `.trim();
 
+function resolveApiKey(explicitKey?: unknown): string {
+  if (typeof explicitKey === "string" && explicitKey.trim()) {
+    return explicitKey.trim();
+  }
+  try {
+    const metaEnv = (import.meta as any)?.env || {};
+    const fromVite =
+      metaEnv.VITE_GEMINI_API_KEY ||
+      metaEnv.VITE_API_KEY ||
+      metaEnv.GEMINI_API_KEY ||
+      "";
+    if (typeof fromVite === "string" && fromVite.trim()) {
+      return fromVite.trim();
+    }
+  } catch {
+    // Ignore import.meta access issues outside module environments
+  }
+  try {
+    const procEnv = (globalThis as any)?.process?.env || {};
+    const fromProc =
+      procEnv.GEMINI_API_KEY ||
+      procEnv.VITE_GEMINI_API_KEY ||
+      procEnv.API_KEY ||
+      "";
+    if (typeof fromProc === "string" && fromProc.trim()) {
+      return fromProc.trim();
+    }
+  } catch {
+    // Ignore process access issues in browser
+  }
+  return "";
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -61,7 +94,7 @@ async function callModelWithRetry(
 }
 
 export async function transcribeAudioToParagraphs(params: {
-  apiKey: string;
+  apiKey?: string;
   audioBase64: string;
   mimeType: string;
   chunkIndex?: number;
@@ -69,13 +102,18 @@ export async function transcribeAudioToParagraphs(params: {
   includeVoiceVault?: boolean;
 }): Promise<string> {
   const {
-    apiKey,
+    apiKey: rawApiKey,
     audioBase64,
     mimeType,
     chunkIndex,
     totalChunks,
     includeVoiceVault = false,
   } = params;
+
+  const apiKey = resolveApiKey(rawApiKey);
+  if (!apiKey) {
+    throw new Error("API key is missing. Please provide a valid API key.");
+  }
 
   const ai = new GoogleGenAI({ apiKey });
 
@@ -118,16 +156,18 @@ export async function transcribeAudioToParagraphs(params: {
   }
   throw lastError;
 }
-export async function generateMinutesDirectly(
-  ...args: any[]
-): Promise<any> {
+
+export async function generateMinutesDirectly(...args: any[]): Promise<any> {
   const first = args[0] || {};
-  const apiKey =
+  const second = args[1] || {};
+  const apiKey = resolveApiKey(
     typeof first === "string"
       ? first
-      : first.apiKey || process.env.GEMINI_API_KEY || "";
-  const audioBase64 = first.audioBase64 || first.base64Audio || "";
-  const mimeType = first.mimeType || "audio/webm";
+      : first.apiKey || first.geminiApiKey || second.apiKey || ""
+  );
+  const audioBase64 =
+    first.audioBase64 || first.base64Audio || first.audioData || "";
+  const mimeType = first.mimeType || first.audioMimeType || "audio/webm";
 
   const paragraphText = await transcribeAudioToParagraphs({
     apiKey,
