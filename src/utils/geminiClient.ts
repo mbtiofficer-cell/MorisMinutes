@@ -118,3 +118,35 @@ export async function transcribeAudioToParagraphs(params: {
   }
   throw lastError;
 }
+export async function generateMinutesDirectly(
+  ...args: any[]
+): Promise<any> {
+  const first = args[0] || {};
+  const apiKey =
+    typeof first === "string"
+      ? first
+      : first.apiKey || process.env.GEMINI_API_KEY || "";
+  const audioBase64 = first.audioBase64 || first.base64Audio || "";
+  const mimeType = first.mimeType || "audio/webm";
+
+  const paragraphText = await transcribeAudioToParagraphs({
+    apiKey,
+    audioBase64,
+    mimeType,
+    chunkIndex: first.chunkIndex,
+    totalChunks: first.totalChunks,
+    includeVoiceVault: false,
+  });
+
+  if (typeof first.onStatus === "function") {
+    first.onStatus("Paragraph transcription complete.");
+  }
+
+  return {
+    transcript: paragraphText,
+    rawTranscript: paragraphText,
+    minutes: paragraphText,
+    summary: paragraphText,
+    text: paragraphText,
+  };
+}
