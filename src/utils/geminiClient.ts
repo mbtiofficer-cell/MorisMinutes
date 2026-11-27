@@ -93,6 +93,18 @@ async function callModelWithRetry(
   throw lastError;
 }
 
+async function blobToBase64(blob: Blob): Promise<string> {
+  const buffer = await blob.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode(...slice);
+  }
+  return btoa(binary);
+}
+
 export async function transcribeAudioToParagraphs(params: {
   apiKey?: string;
   audioBase64: string;
@@ -158,28 +170,56 @@ export async function transcribeAudioToParagraphs(params: {
 }
 
 export async function generateMinutesDirectly(...args: any[]): Promise<any> {
-  const first = args[0] || {};
-  const second = args[1] || {};
+  const targetFile = args[0];
+  const targetName = typeof args[1] === "string" ? args[1] : "";
+  const options = args[2] && typeof args[2] === "object" ? args[2] : {};
+
   const apiKey = resolveApiKey(
-    typeof first === "string"
-      ? first
-      : first.apiKey || first.geminiApiKey || second.apiKey || ""
+    options.apiKey ||
+      options.geminiApiKey ||
+      (typeof targetFile === "object" && targetFile ? targetFile.apiKey : "")
   );
-  const audioBase64 =
-    first.audioBase64 || first.base64Audio || first.audioData || "";
-  const mimeType = first.mimeType || first.audioMimeType || "audio/webm";
+
+  let audioBase64 = "";
+  let mimeType = options.mimeType || "audio/webm";
+
+  if (
+    targetFile instanceof Blob ||
+    (targetFile && typeof targetFile.arrayBuffer === "function")
+  ) {
+    mimeType = targetFile.type || mimeType;
+    audioBase64 = await blobToBase64(targetFile as Blob);
+  } else if (targetFile && typeof targetFile === "object") {
+    audioBase64 =
+      targetFile.audioBase64 ||
+      targetFile.base64Audio ||
+      targetFile.audioData ||
+      targetFile.data ||
+      "";
+    mimeType = targetFile.mimeType || targetFile.type || mimeType;
+  } else if (typeof targetFile === "string") {
+    audioBase64 = targetFile.includes(",")
+      ? targetFile.split(",")[1]
+      : targetFile;
+  }
+
+  if (!audioBase64) {
+    throw new Error(
+      `No audio data found on targetFile (${targetName || "unnamed"}). Please select a valid audio file.`
+    );
+  }
 
   const paragraphText = await transcribeAudioToParagraphs({
     apiKey,
     audioBase64,
     mimeType,
-    chunkIndex: first.chunkIndex,
-    totalChunks: first.totalChunks,
+    chunkIndex: options.chunkIndex,
+    totalChunks: options.totalChunks,
     includeVoiceVault: false,
   });
 
-  if (typeof first.onStatus === "function") {
-    first.onStatus("Paragraph transcription complete.");
+  if (typeof options.onStatus === "function") {
+    options.onStatus("Paragraph transcription complete.");
   }
 
   return {
