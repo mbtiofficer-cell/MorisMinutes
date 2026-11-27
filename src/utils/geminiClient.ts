@@ -1,306 +1,240 @@
-import { GoogleGenAI } from "@google/genai";
-import { getAllVoiceProfiles } from "./voiceVault";
+import { GoogleGenAI } from '@google/genai';
+import { MeetingAnalysisResult, MinutesLanguage, TranscriptFormat, MinutesTone, MeetingMetadata } from '../types';
+import { buildMeetingPrompt } from './promptBuilder';
+import { parseMeetingJsonResponse } from './jsonParser';
 
-const CANDIDATE_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash"];
-const REQUEST_TIMEOUT_MS = 90000;
+export interface DirectGenerationOptions {
+  minutesLanguage?: MinutesLanguage;
+  transcriptFormat?: TranscriptFormat;
+  minutesTone?: MinutesTone;
+  additionalContext?: string;
+  meetingMetadata?: MeetingMetadata;
+}
 
-const PARAGRAPH_TRANSCRIPTION_PROMPT = `
-Transcribe everything spoken in this audio recording into clear, complete paragraphs.
-Rules:
-- Capture all spoken content faithfully across Mauritian Creole (Morisyen), French, and English without summarizing away details or stopping early.
-- Write in continuous, well-spaced paragraphs rather than Speaker 1 / Speaker 2 turn labels.
-- Do not invent names or guess speakers; focus on capturing every word and idea accurately so it can be organized into minutes or assigned to speakers afterward.
-- Keep natural phrasing and accurate terminology.
-`.trim();
+let cachedApiKey: string | null = null;
 
-function resolveApiKey(explicitKey?: unknown): string {
-  if (typeof explicitKey === "string" && explicitKey.trim()) {
-    return explicitKey.trim();
+export async function getClientApiKey(): Promise<string> {
+  if (cachedApiKey) return cachedApiKey;
+
+  // 1. Check process.env if injected by Vite
+  if (typeof process !== 'undefined' && process.env && process.env.GEMINI_API_KEY) {
+    cachedApiKey = process.env.GEMINI_API_KEY;
+    return cachedApiKey;
   }
+
+  // 2. Fetch from lightweight local config route with content-type verification
   try {
-    const metaEnv = (import.meta as any)?.env || {};
-    const fromVite =
-      metaEnv.VITE_GEMINI_API_KEY ||
-      metaEnv.VITE_API_KEY ||
-      metaEnv.GEMINI_API_KEY ||
-      "";
-    if (typeof fromVite === "string" && fromVite.trim()) {
-      return fromVite.trim();
-    }
-  } catch {
-    // Ignore import.meta access issues outside module environments
-  }
-  try {
-    const procEnv = (globalThis as any)?.process?.env || {};
-    const fromProc =
-      procEnv.GEMINI_API_KEY ||
-      procEnv.VITE_GEMINI_API_KEY ||
-      procEnv.API_KEY ||
-      "";
-    if (typeof fromProc === "string" && fromProc.trim()) {
-      return fromProc.trim();
-    }
-  } catch {
-    // Ignore process access issues in browser
-  }
-  return "";
-}
-
-function extractResponseText(response: any): string {
-  if (!response) return "";
-  if (typeof response.text === "string" && response.text.trim()) {
-    return response.text.trim();
-  }
-  const candidates = response.candidates || response.response?.candidates || [];
-  const collected: string[] = [];
-  for (const cand of candidates) {
-    const parts = cand?.content?.parts || [];
-    for (const part of parts) {
-      if (typeof part?.text === "string" && part.text.trim()) {
-        collected.push(part.text.trim());
+    const res = await fetch('/api/config');
+    if (res.ok) {
+      const contentType = res.headers.get('content-type') || '';
+      if (contentType.includes('application/json')) {
+        const data = await res.json();
+        if (data && data.apiKey) {
+          cachedApiKey = data.apiKey;
+          return data.apiKey;
+        }
+      } else {
+        const text = await res.text();
+        console.warn('/api/config returned non-JSON response:', text.slice(0, 80));
       }
     }
-  }
-  return collected.join("\n\n").trim();
-}
-
-function formatError(err: unknown): string {
-  if (!err) return "Unknown error";
-  if (typeof err === "string") return err;
-  const anyErr = err as any;
-  return (
-    anyErr?.message ||
-    anyErr?.error?.message ||
-    JSON.stringify(anyErr) ||
-    String(err)
-  );
-}
-
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-function isRetryableError(msg: string): boolean {
-  const lower = msg.toLowerCase();
-  return (
-    lower.includes("503") ||
-    lower.includes("unavailable") ||
-    lower.includes("high demand") ||
-    lower.includes("429") ||
-    lower.includes("resource_exhausted") ||
-    lower.includes("500") ||
-    lower.includes("504") ||
-    lower.includes("timeout") ||
-    lower.includes("timed out")
-  );
-}
-
-async function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeoutPromise = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`${label} timed out after ${Math.round(ms / 1000)}s.`));
-    }, ms);
-  });
-
-  try {
-    return await Promise.race([promise, timeoutPromise]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
-async function callModelWithRetry(
-  ai: GoogleGenAI,
-  model: string,
-  contents: any[],
-  onStatus?: (msg: string) => void
-): Promise<string> {
-  let lastMsg = "";
-  for (let attempt = 1; attempt <= 2; attempt++) {
-    try {
-      if (typeof onStatus === "function") {
-        onStatus(`Transcribing with ${model} (attempt ${attempt}/2)...`);
-      }
-      const response = await withTimeout(
-        ai.models.generateContent({
-          model,
-          contents,
-        }),
-        REQUEST_TIMEOUT_MS,
-        `${model} request`
-      );
-      const text = extractResponseText(response);
-      if (!text) {
-        const finishReason =
-          (response as any)?.candidates?.[0]?.finishReason || "no finishReason";
-        throw new Error(`${model} returned empty text (finishReason: ${finishReason})`);
-      }
-      return text;
-    } catch (err) {
-      lastMsg = formatError(err);
-      if (!isRetryableError(lastMsg) || attempt === 2) {
-        throw new Error(lastMsg);
-      }
-      if (typeof onStatus === "function") {
-        onStatus(`Retrying ${model} in ${attempt * 3}s...`);
-      }
-      await sleep(3000 * attempt);
-    }
-  }
-  throw new Error(lastMsg || `${model} failed`);
-}
-
-async function blobToBase64(blob: Blob): Promise<string> {
-  const buffer = await blob.arrayBuffer();
-  const bytes = new Uint8Array(buffer);
-  let binary = "";
-  const chunkSize = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const slice = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode(...slice);
-  }
-  return btoa(binary);
-}
-
-export async function transcribeAudioToParagraphs(params: {
-  apiKey?: string;
-  audioBase64: string;
-  mimeType: string;
-  chunkIndex?: number;
-  totalChunks?: number;
-  includeVoiceVault?: boolean;
-  onStatus?: (msg: string) => void;
-}): Promise<string> {
-  const {
-    apiKey: rawApiKey,
-    audioBase64,
-    mimeType,
-    chunkIndex,
-    totalChunks,
-    includeVoiceVault = false,
-    onStatus,
-  } = params;
-
-  const apiKey = resolveApiKey(rawApiKey);
-  if (!apiKey) {
-    throw new Error("API key is missing. Please provide a valid API key.");
+  } catch (err) {
+    console.warn('Could not fetch apiKey from /api/config:', err);
   }
 
-  const ai = new GoogleGenAI({ apiKey });
+  throw new Error('GEMINI_API_KEY is not configured. Please ensure it is set in your environment.');
+}
 
-  const chunkNote =
-    typeof chunkIndex === "number" && typeof totalChunks === "number"
-      ? `\nSegment ${chunkIndex + 1} of ${totalChunks}: transcribe this segment completely into paragraphs.`
-      : "";
+/**
+ * Direct client-side Gemini API call using the Gemini Files API (`ai.files.upload`).
+ *
+ * 1. Uploads the compressed audio blob directly to the Gemini Files API from the browser.
+ * 2. Polls until the file state becomes ACTIVE.
+ * 3. Passes the file object URI ({ fileData: { fileUri, mimeType } }) directly into model.generateContent.
+ * 4. Generates verbatim transcription and executive meeting minutes in the user-selected languages and format.
+ * 5. Cleans up the temporary Gemini Files API resource after processing.
+ */
+export async function generateMinutesDirectly(
+  audioBlob: Blob,
+  filename: string,
+  options?: DirectGenerationOptions | string,
+  onStatus?: (status: string) => void
+): Promise<{ success: boolean; modelUsed: string; fileUriUsed: string; data: MeetingAnalysisResult }> {
+  // Support both options object and legacy additionalContext string
+  const opts: DirectGenerationOptions = typeof options === 'string'
+    ? { additionalContext: options }
+    : (options || {});
 
-  const parts: any[] = [
-    {
-      inlineData: {
-        data: audioBase64,
-        mimeType,
+  const minutesLanguage = opts.minutesLanguage || 'English';
+  const transcriptFormat = opts.transcriptFormat || 'original';
+  const minutesTone = opts.minutesTone || 'diplomatic';
+  const additionalContext = opts.additionalContext;
+
+  onStatus?.('Initializing direct client-side connection to Gemini API...');
+  const apiKey = await getClientApiKey();
+
+  const ai = new GoogleGenAI({
+    apiKey,
+    httpOptions: {
+      headers: {
+        'User-Agent': 'aistudio-build',
       },
     },
-    {
-      text: `${PARAGRAPH_TRANSCRIPTION_PROMPT}${chunkNote}`,
-    },
-  ];
+  });
 
-  if (includeVoiceVault) {
-    const savedVoices = (await getAllVoiceProfiles()).slice(0, 8);
-    if (savedVoices.length > 0) {
-      const names = savedVoices.map((v: any) => v.name).filter(Boolean);
-      if (names.length > 0) {
-        parts.push({
-          text: `Optional reference names if clearly stated: ${names.join(", ")}. Still write in clean paragraphs without forcing speaker labels.`,
-        });
+  let uploadedFile: any = null;
+
+  try {
+    // 1. Upload audio file blob using the Gemini Files API directly from browser
+    onStatus?.('Uploading compressed audio to Gemini Files API from browser...');
+    const uploadDisplayName = filename || `recording_${Date.now()}.mp3`;
+
+    uploadedFile = await ai.files.upload({
+      file: audioBlob,
+      config: {
+        mimeType: 'audio/mp3',
+        displayName: uploadDisplayName,
+      },
+    });
+
+    console.log('[Client Files API] Uploaded file:', uploadedFile.name, 'URI:', uploadedFile.uri, 'State:', uploadedFile.state);
+
+    // 2. Wait for the file state to become ACTIVE
+    let fileState = uploadedFile.state;
+    let pollCount = 0;
+    while ((fileState === 'PROCESSING' || !fileState) && pollCount < 35) {
+      onStatus?.(`Processing audio in Gemini Files API (${pollCount + 1}/35)...`);
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+      try {
+        const fileCheck = await ai.files.get({ name: uploadedFile.name });
+        fileState = fileCheck.state;
+      } catch (checkErr) {
+        console.warn('Could not check file state:', checkErr);
+      }
+      pollCount++;
+    }
+
+    if (fileState === 'FAILED') {
+      throw new Error('Gemini Files API audio processing failed. The audio file could not be prepared.');
+    }
+
+    // Verify file state is strictly ACTIVE before calling generateContent
+    if (fileState !== 'ACTIVE') {
+      try {
+        const fileFinalCheck = await ai.files.get({ name: uploadedFile.name });
+        fileState = fileFinalCheck.state;
+      } catch {
+        // ignore
+      }
+      if (fileState !== 'ACTIVE') {
+        throw new Error(`Audio file state is "${fileState || 'PENDING'}". Audio must be in ACTIVE state before generating minutes.`);
+      }
+    }
+
+    onStatus?.(`Audio ACTIVE in Gemini Files API. Generating minutes in ${minutesLanguage}...`);
+
+    // 3. Pass the file object URI directly to model.generateContent
+    const audioPart = {
+      fileData: {
+        fileUri: uploadedFile.uri,
+        mimeType: uploadedFile.mimeType || 'audio/mp3',
+      },
+    };
+
+    // Build dynamic prompt based on selected Minutes Language, Transcript Format & Tone
+    const userPrompt = buildMeetingPrompt(
+      minutesLanguage,
+      transcriptFormat,
+      minutesTone,
+      additionalContext,
+      opts.meetingMetadata
+    );
+
+    const candidateModels = [
+      'gemini-3.8-flash',
+      'gemini-3.1-flash-lite',
+    ];
+
+    let response: any = null;
+    let modelUsed = candidateModels[0];
+    let lastError: any = null;
+
+    for (const modelCandidate of candidateModels) {
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        try {
+          onStatus?.(`Transcribing audio with ${modelCandidate} directly via Gemini API${attempt > 1 ? ' (retry)' : ''}...`);
+          const res = await ai.models.generateContent({
+            model: modelCandidate,
+            contents: {
+              parts: [audioPart, { text: userPrompt }],
+            },
+            config: {
+              responseMimeType: 'application/json',
+              temperature: 0.15,
+              maxOutputTokens: 8192,
+            },
+          });
+
+          // Check if response text is present
+          let candidateText = '';
+          if (typeof res?.text === 'string' && res.text.trim()) {
+            candidateText = res.text.trim();
+          } else if (res?.candidates?.[0]?.content?.parts) {
+            candidateText = res.candidates[0].content.parts
+              .map((p: any) => p.text || '')
+              .join('')
+              .trim();
+          }
+
+          if (candidateText) {
+            response = res;
+            modelUsed = modelCandidate;
+            break;
+          } else {
+            console.warn(`Model ${modelCandidate} returned empty text, checking candidate parts...`);
+          }
+        } catch (err: any) {
+          lastError = err;
+          console.warn(`Direct client call to ${modelCandidate} (attempt ${attempt}) failed:`, err?.message);
+          if (attempt < 2 && (err?.status === 503 || err?.status === 429)) {
+            await new Promise((r) => setTimeout(r, 1500));
+          }
+        }
+      }
+      if (response) break;
+    }
+
+    // Extract text safely from response
+    let rawText = '';
+    if (response) {
+      if (typeof response.text === 'string' && response.text.trim()) {
+        rawText = response.text.trim();
+      } else if (response.candidates?.[0]?.content?.parts) {
+        rawText = response.candidates[0].content.parts
+          .map((p: any) => p.text || '')
+          .join('')
+          .trim();
+      }
+    }
+
+    onStatus?.('Parsing and structuring executive meeting minutes...');
+    const parsedData = parseMeetingJsonResponse(rawText, filename, minutesLanguage, opts.meetingMetadata);
+
+    return {
+      success: true,
+      modelUsed,
+      fileUriUsed: uploadedFile.uri,
+      data: parsedData,
+    };
+  } finally {
+    // 5. Clean up remote file from Gemini Files API after processing
+    if (uploadedFile?.name) {
+      try {
+        console.log('[Client Files API] Cleaning up remote file:', uploadedFile.name);
+        await ai.files.delete({ name: uploadedFile.name });
+      } catch (cleanupErr: any) {
+        console.warn('[Client Files API] Could not delete temporary remote file:', cleanupErr?.message);
       }
     }
   }
-
-  const errors: string[] = [];
-  for (const model of CANDIDATE_MODELS) {
-    try {
-      return await callModelWithRetry(ai, model, parts, onStatus);
-    } catch (err) {
-      errors.push(formatError(err));
-    }
-  }
-  throw new Error(errors.join(" | ") || "Received empty response from Gemini API.");
-}
-
-export async function generateMinutesDirectly(...args: any[]): Promise<any> {
-  const targetFile = args[0];
-  const targetName = typeof args[1] === "string" ? args[1] : "";
-  const options = args[2] && typeof args[2] === "object" ? args[2] : {};
-  const onStatus =
-    typeof options.onStatus === "function" ? options.onStatus : undefined;
-
-  if (onStatus) {
-    onStatus("Checking API key and preparing audio...");
-  }
-
-  const apiKey = resolveApiKey(
-    options.apiKey ||
-      options.geminiApiKey ||
-      (typeof targetFile === "object" && targetFile ? targetFile.apiKey : "")
-  );
-
-  let audioBase64 = "";
-  let mimeType = options.mimeType || "audio/webm";
-
-  if (
-    targetFile instanceof Blob ||
-    (targetFile && typeof targetFile.arrayBuffer === "function")
-  ) {
-    mimeType = targetFile.type || mimeType;
-    const sizeMb =
-      typeof targetFile.size === "number"
-        ? (targetFile.size / (1024 * 1024)).toFixed(1)
-        : "?";
-    if (onStatus) {
-      onStatus(`Reading audio file (${sizeMb} MB)...`);
-    }
-    audioBase64 = await blobToBase64(targetFile as Blob);
-  } else if (targetFile && typeof targetFile === "object") {
-    audioBase64 =
-      targetFile.audioBase64 ||
-      targetFile.base64Audio ||
-      targetFile.audioData ||
-      targetFile.data ||
-      "";
-    mimeType = targetFile.mimeType || targetFile.type || mimeType;
-  } else if (typeof targetFile === "string") {
-    audioBase64 = targetFile.includes(",")
-      ? targetFile.split(",")[1]
-      : targetFile;
-  }
-
-  if (!audioBase64) {
-    throw new Error(
-      `No audio data found on targetFile (${targetName || "unnamed"}). Please select a valid audio file.`
-    );
-  }
-
-  const paragraphText = await transcribeAudioToParagraphs({
-    apiKey,
-    audioBase64,
-    mimeType,
-    chunkIndex: options.chunkIndex,
-    totalChunks: options.totalChunks,
-    includeVoiceVault: false,
-    onStatus,
-  });
-
-  if (onStatus) {
-    onStatus("Paragraph transcription complete.");
-  }
-
-  return {
-    transcript: paragraphText,
-    rawTranscript: paragraphText,
-    minutes: paragraphText,
-    summary: paragraphText,
-    text: paragraphText,
-  };
 }
